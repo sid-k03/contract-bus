@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# runtime SQLite store (store-and-forward bus state)
+bus.sqlite3
+bus.sqlite3-wal
+bus.sqlite3-shm
