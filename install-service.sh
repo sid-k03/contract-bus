@@ -42,6 +42,10 @@ cat > "$PLIST" <<PLISTEOF
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- Auto-reload is handled IN-PROCESS by bus_server.py (it exits on its own source
+         change; KeepAlive respawns it). NOT via launchd WatchPaths: WatchPaths only starts
+         a stopped job, and KeepAlive keeps this one always running, so WatchPaths is inert
+         here (verified empirically). -->
     <key>StandardOutPath</key>
     <string>$LOG_DIR/$LABEL.log</string>
     <key>StandardErrorPath</key>

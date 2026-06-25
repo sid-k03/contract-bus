@@ -157,8 +157,11 @@ posts questions; backend reads replies. Each session tracks the last `id` it saw
 ## 9. Out of scope (deliberately)
 
 - **Validation** of message contents against any schema/OpenAPI — dropped as overhead.
-- **Push / notifications** — neither session is woken; each must call `read_messages` on
-  its own turn. (A future `wait_for_message` long-poll could add near-push, but not now.)
+- **Push / notifications** — ~~neither session is woken; each must call `read_messages` on
+  its own turn.~~ **Amended:** the foreseen `wait_for_message` long-poll was implemented
+  (plus a `watch_channel` directive tool and a curl-able `/wait` route). It's bounded
+  long-poll, not MCP `notifications/*` (which a turn-based agent can't act on), and adds no
+  consumer state — the `since_id` cursor model is unchanged. See CLAUDE.md → Architecture.
 - **Auth / multi-user / remote access** — localhost, single trusted user.
 - **Deletion / editing** of messages — append-only log.
 - **Multiple machines** — same-host only (shared localhost daemon).
