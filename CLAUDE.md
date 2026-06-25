@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Implemented. `bus_server.py` (logic + 4 MCP tools), `test_bus_server.py` (16 tests, all
 passing), `requirements.txt`, `README.md`, `.gitignore`, and macOS auto-start scripts
 (`install-service.sh` / `uninstall-service.sh`). The spec `mcp-contract-bus-spec.md`
-remains the design source of truth. Not yet a git repo.
+remains the design source of truth. Git repo on `main`, remote
+`https://github.com/sid-k03/contract-bus`.
 
 The auto-start scripts generate a per-user LaunchAgent `com.blocksurvey.contract-bus`
 (`~/Library/LaunchAgents/…plist`) with `RunAtLoad`+`KeepAlive`, pinning an absolute
