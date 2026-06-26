@@ -7,13 +7,11 @@ description: Use when the human deems this session's bus work finished ("wind do
 
 The human has decided this session's bus work is done. Tear it down:
 
-```bash
-python3 "<plugin root>/bus_cli.py" conclude-cli "$CLAUDE_CODE_SESSION_ID"
-```
+Run the **`/contract-bus:conclude`** slash command (marks this session offline, removes local
+state under `~/.contract-bus/<session_id>/`). Then stop any background watcher you launched.
+(Manual install: `python3 "<repo>/bus_cli.py" conclude-cli "$CLAUDE_CODE_SESSION_ID"`.)
 
-This registers you `offline`, removes the watcher pid, and `rm -rf`s your
-`~/.contract-bus/<session_id>/` state dir. Confirm to the human what was cleaned up. If a
-watcher is still parked in the background, stop it.
+Confirm to the human what was cleaned up.
 
 This is distinct from simply ending the session, which keeps state so a `--resume` can
 re-arm. Conclude only when the coordination work itself is finished.

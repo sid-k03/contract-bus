@@ -109,7 +109,7 @@ def test_daemon_up_and_register_roundtrip(tmp_path):
 
 def test_watch_command_shape():
     cmd = c.watch_command("s", "h", 7, plugin_root="/p")
-    assert cmd == "bash /p/bus_watch.sh s h 7"
+    assert cmd == 'bash "/p/bus_watch.sh" s h 7'
 
 
 def test_launch_directive_embeds_handle_cursor_and_floor(tmp_path):
@@ -119,7 +119,7 @@ def test_launch_directive_embeds_handle_cursor_and_floor(tmp_path):
     c.write_cursor(sid, 5, root=str(tmp_path))
     msg = c.launch_directive(sid, plugin_root="/p", root=str(tmp_path))
     assert "data-bus-mcp-a3f29c1b" in msg
-    assert "bus_watch.sh s data-bus-mcp-a3f29c1b 5" in msg
+    assert 'bus_watch.sh" s data-bus-mcp-a3f29c1b 5' in msg
     assert "background" in msg.lower()
     assert "wait_for_message" in msg            # the documented floor is offered
     assert "untrusted" in msg.lower()           # security note present
@@ -133,7 +133,7 @@ def test_join_writes_state_and_returns_directive(tmp_path, monkeypatch):
     out = c.join("abcdef1234", "/Users/x/Data Bus MCP", current_task="checkout", plugin_root="/p")
     assert c.read_identity("abcdef1234", root=str(tmp_path)) == "data-bus-mcp-abcdef12"
     assert c.is_active("abcdef1234", root=str(tmp_path)) is True
-    assert "bus_watch.sh abcdef1234 data-bus-mcp-abcdef12 0" in out["hookSpecificOutput"]["additionalContext"]
+    assert 'bus_watch.sh" abcdef1234 data-bus-mcp-abcdef12 0' in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_ev_session_start_directive_when_active_else_none(tmp_path, monkeypatch):
@@ -254,3 +254,18 @@ def test_venv_python_rebuilds_on_stale_or_missing_sentinel(monkeypatch, tmp_path
     py = c._venv_python("/plugin")
     assert removed["n"] == 1                    # partial venv wiped first
     assert (venv / ".ready").read_text() == "abc"   # sentinel written after build
+
+
+# --- plugin-root resolution + watch path quoting (Task 6) -----------------
+
+def test_main_prefers_claude_plugin_root(monkeypatch):
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/plug/root")
+    seen = {}
+    monkeypatch.setattr(c, "ensure_daemon", lambda pr, *a, **k: seen.setdefault("pr", pr) or True)
+    c.main(["bus_cli.py", "ensure-daemon"])
+    assert seen["pr"] == "/plug/root"
+
+
+def test_watch_command_quotes_path_with_spaces():
+    cmd = c.watch_command("sid", "h", 7, plugin_root="/a b/Data Bus MCP")
+    assert cmd == 'bash "/a b/Data Bus MCP/bus_watch.sh" sid h 7'

@@ -10,17 +10,14 @@ Claude Code sessions). Do this when the human says this task needs to coordinate
 session (e.g. backend ↔ frontend).
 
 ## Activate
-Register this session. The session id is in `$CLAUDE_CODE_SESSION_ID` and the project root
-comes from git; pass them to the join helper with a one-line description of your current task:
+Run the **`/contract-bus:join`** slash command with a one-line task description, e.g.
+`/contract-bus:join wiring the checkout API contract`. It brings the shared daemon up (first run
+provisions a venv, ~30s), registers this session, derives your handle from the git project root,
+and prints a `[contract-bus]` directive with your handle + watcher launch line.
 
-```bash
-ROOT="$(git rev-parse --show-toplevel)"
-python3 "<plugin root>/bus_cli.py" join-cli "$CLAUDE_CODE_SESSION_ID" "$ROOT" "<one-line current_task>"
-```
-
-It prints a directive containing your handle and the exact watcher command. (`CLAUDE_CODE_SESSION_ID`
-is the same id the hooks receive, so the state dir the skill creates and the dir the hooks
-check are identical.)
+> The slash command is required on a plugin install because `${CLAUDE_PLUGIN_ROOT}` is not
+> available to your own Bash tool. On a manual (non-plugin) install run instead:
+> `ROOT="$(git rev-parse --show-toplevel)"; python3 "<repo>/bus_cli.py" join-cli "$CLAUDE_CODE_SESSION_ID" "$ROOT" "<task>"`
 
 ## Listen for mail — prefer the watcher (it keeps your session FREE)
 - **DEFAULT — the background watcher.** Run the watcher command from the join directive as a

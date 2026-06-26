@@ -225,7 +225,7 @@ def ensure_daemon(plugin_root: str, timeout: float = 30.0) -> bool:
 # --- the model-owned watcher launch directive (spec §6.1) -----------------
 
 def watch_command(session_id: str, handle: str, since_id: int, plugin_root: str = ".") -> str:
-    return f"bash {plugin_root}/bus_watch.sh {session_id} {handle} {int(since_id)}"
+    return f'bash "{plugin_root}/bus_watch.sh" {session_id} {handle} {int(since_id)}'
 
 
 def launch_directive(session_id: str, plugin_root: str = ".", root: str = STATE_ROOT) -> str:
@@ -364,8 +364,9 @@ def ev_session_end(hook: dict) -> None:
 
 def main(argv: list[str]) -> int:
     event = argv[1] if len(argv) > 1 else ""
-    plugin_root = os.environ.get("CONTRACT_BUS_PLUGIN_ROOT",
-                                 os.path.dirname(os.path.abspath(__file__)))
+    plugin_root = (os.environ.get("CLAUDE_PLUGIN_ROOT")
+                   or os.environ.get("CONTRACT_BUS_PLUGIN_ROOT")
+                   or os.path.dirname(os.path.abspath(__file__)))
     # argv-driven commands (skills call these; they do NOT read stdin)
     if event == "join-cli":
         sid, root_arg = argv[2], argv[3]
