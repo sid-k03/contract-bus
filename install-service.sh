@@ -7,7 +7,16 @@ LABEL="com.blocksurvey.contract-bus"
 # Absolute project dir (resolves symlinks, tolerates spaces).
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PY="$DIR/.venv/bin/python"
-DB="$DIR/bus.sqlite3"
+HOME_DIR="$HOME/.claude/plugins/contract-bus"
+DB="$HOME_DIR/bus.sqlite3"
+mkdir -p "$HOME_DIR"
+# One-time migration: preserve existing repo mail by moving it to the canonical home (D6).
+if [ -f "$DIR/bus.sqlite3" ] && [ ! -f "$DB" ]; then
+  cp "$DIR/bus.sqlite3" "$DB"
+  [ -f "$DIR/bus.sqlite3-wal" ] && cp "$DIR/bus.sqlite3-wal" "$DB-wal" || true
+  [ -f "$DIR/bus.sqlite3-shm" ] && cp "$DIR/bus.sqlite3-shm" "$DB-shm" || true
+  echo "migrated existing bus.sqlite3 → $DB"
+fi
 LOG_DIR="$HOME/Library/Logs"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
