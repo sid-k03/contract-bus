@@ -24,4 +24,13 @@ with open(settings, "w") as f:
     json.dump(cur, f, indent=2)
 print(f"wired contract-bus hooks into {settings}")
 PY
-echo "Done. New sessions pick up the hooks; existing sessions: restart or /hooks reload."
+# Link the 3 skills into the user skills dir so Claude Code auto-discovers them (no plugin
+# needed for the interim; Plan 3 ships them inside the plugin instead). Symlinks stay in sync
+# with the repo.
+SKILLS_DIR="${CLAUDE_SKILLS:-$HOME/.claude/skills}"
+mkdir -p "$SKILLS_DIR"
+for s in join-contract-bus orchestrating-contract-bus-sessions conclude-bus-session; do
+  ln -sfn "$ROOT/skills/$s" "$SKILLS_DIR/$s"
+done
+echo "Linked skills into $SKILLS_DIR"
+echo "Done. New sessions pick up the hooks + skills; existing sessions: restart or /hooks reload."

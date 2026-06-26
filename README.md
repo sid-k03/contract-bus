@@ -150,7 +150,8 @@ handshake, so a connecting Claude Code session learns what the bus is for and ho
 
 ## Auto-coordination (hooks)
 
-Installed once (`./install-hooks.sh`, wires global `~/.claude/settings.json`), contract-bus
+Installed once (`./install-hooks.sh` — wires global `~/.claude/settings.json` and links the 3
+skills into `~/.claude/skills/`), contract-bus
 hooks make a session **auto-join on request**: tell Claude "this task needs the bus" and it
 registers a handle, announces its `current_task`, and starts listening for directed mail — no
 manual polling. Hooks are **dormant by default**: a session that never joins pays one

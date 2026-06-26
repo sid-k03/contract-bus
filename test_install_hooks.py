@@ -16,3 +16,12 @@ def test_snippet_is_valid_json_and_wires_events():
     assert all("bus_gate.sh" in cmd and "bus_cli.py" in cmd for cmd in cmds)
     # PostToolUse is intentionally NOT wired (cursor owned by watcher; avoids per-call cost)
     assert "PostToolUse" not in hooks
+
+
+def test_three_skills_present_with_frontmatter():
+    for name in ("join-contract-bus", "orchestrating-contract-bus-sessions",
+                 "conclude-bus-session"):
+        p = os.path.join(HERE, "skills", name, "SKILL.md")
+        assert os.path.exists(p), f"missing skill {name}"
+        head = open(p).read(600)
+        assert f"name: {name}" in head and "description:" in head
