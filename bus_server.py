@@ -16,8 +16,6 @@ import os
 import sqlite3
 import threading
 import time
-from urllib.parse import quote
-
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -27,44 +25,25 @@ HOST = "127.0.0.1"  # localhost only — there is no auth (see spec §9)
 PORT = 9100
 MAX_LIMIT = 200
 MAX_WAIT = 600  # cap (seconds) on a single long-poll; clients re-issue to keep waiting
+PRESENCE_TTL = 900  # seconds; a session whose last_seen is older reports offline.
+                    # > MAX_WAIT so a session parked on a long-poll never ages out mid-wait.
 
 # Sent to every client during the MCP `initialize` handshake (FastMCP `instructions`),
 # AND returned by the `usage` tool. So a session discovers what this bus is for the moment
 # it connects — no tool call required — and can re-read the guide on demand mid-task.
 GUIDE = """\
-contract-bus — a shared message bus for coordinating TWO Claude Code sessions working on
-the same feature in DIFFERENT repos (e.g. backend + frontend), without a human relaying
-messages. It is a durable store-and-forward log (SQLite); it does not validate, notify, or
-authenticate.
+contract-bus: a durable SQLite message bus for coordinating independent Claude Code sessions
+across different repos (e.g. backend + frontend) without a human relaying messages.
 
-When to reach for it: you're implementing one side of a contract the other repo's session
-also needs — an API shape, a schema, an enum, an answer to their question. Post it here
-instead of asking the human to copy-paste.
+- post_message(channel, author, body, to=None): publish to a channel. Address one session
+  with to=<handle>, or broadcast with to=None.
+- read_messages(channel, since_id=0, as_handle=None): messages newer than since_id, oldest
+  first. Pass as_handle=<your handle> to get broadcasts + mail addressed to you. Track the
+  highest id you've seen as since_id — the server keeps no read state.
+- list_channels(): active channels. list_sessions(): who's connected, their status and
+  current_task.
 
-Workflow:
-- Agree on a `channel` name per feature, e.g. "feature-checkout". `author` is free-form
-  ("backend"/"frontend").
-- post_message(channel, author, body): publish a contract/message/answer.
-- read_messages(channel, since_id=0, limit=50): at the start of shared work read with
-  since_id=0; then track the highest `id` you've seen and pass it as since_id to fetch only
-  NEW replies. The server stores no read state — the cursor lives in your context.
-- list_channels(): discover active threads when you don't know the channel name.
-
-Waiting for a reply (push, not poll-by-hand): after you post and need the other side's
-answer, don't busy-loop read_messages.
-- If you have nothing else to do, call wait_for_message(channel, since_id): it BLOCKS this
-  session until a newer message arrives (or it times out), then returns it. On timeout it
-  returns [] — if you still need the reply, call it AGAIN with the same since_id to keep
-  waiting (re-queue). [] means "nothing yet," not "no reply is coming."
-- If you want to keep working while you wait, call watch_channel(channel, since_id): it does
-  NOT block — it returns a `curl` command. Run that command in the BACKGROUND (a backgrounded
-  shell command). It stays parked server-side and exits the moment a newer message lands,
-  which wakes you holding the reply. Then advance since_id to the newest id and call
-  watch_channel again to keep listening.
-
-Etiquette: read before you start a shared-feature task, post decisions as you make them,
-and re-read (or wait/watch) with your last seen id before assuming the other side hasn't
-replied."""
+Call usage() to re-read this."""
 
 mcp = FastMCP("contract-bus", instructions=GUIDE)
 
@@ -78,7 +57,7 @@ def _connect(db: str) -> sqlite3.Connection:
 
 
 def _init(db: str = DB) -> None:
-    """Create the messages table + index and enable WAL. Idempotent."""
+    """Create tables + indexes, enable WAL, and apply the v2 migration. Idempotent."""
     with _connect(db) as c:
         c.execute("PRAGMA journal_mode=WAL;")
         c.execute(
@@ -89,32 +68,60 @@ def _init(db: str = DB) -> None:
                 body       TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')))"""
         )
+        # v2: add the recipient column if an older DB predates it (idempotent migration).
+        cols = {row["name"] for row in c.execute("PRAGMA table_info(messages)")}
+        if "recipient" not in cols:
+            c.execute("ALTER TABLE messages ADD COLUMN recipient TEXT")  # NULL = broadcast
         c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel, id)"
+            """CREATE TABLE IF NOT EXISTS sessions(
+                handle        TEXT PRIMARY KEY,
+                repo          TEXT,
+                status        TEXT NOT NULL DEFAULT 'online',
+                current_task  TEXT,
+                last_seen     TEXT NOT NULL DEFAULT (datetime('now')),
+                registered_at TEXT NOT NULL DEFAULT (datetime('now')))"""
         )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel, id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel_recipient_id ON messages(channel, recipient, id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_messages_recipient_id ON messages(recipient, id)")
 
 
-def _post_message(db: str, channel: str, author: str, body: str) -> dict:
+def _post_message(db: str, channel: str, author: str, body: str, recipient: str | None = None) -> dict:
     if not channel or not body:
         return {"error": "channel and body are required"}
     with _connect(db) as c:
         cur = c.execute(
-            "INSERT INTO messages(channel, author, body) VALUES (?,?,?)",
-            (channel, author, body),
+            "INSERT INTO messages(channel, author, body, recipient) VALUES (?,?,?,?)",
+            (channel, author, body, recipient),
         )
         row = c.execute(
             "SELECT id, created_at FROM messages WHERE id=?", (cur.lastrowid,)
         ).fetchone()
-    return {"id": row["id"], "channel": channel, "created_at": row["created_at"]}
+    return {"id": row["id"], "channel": channel, "recipient": recipient, "created_at": row["created_at"]}
 
 
-def _read_messages(db: str, channel: str, since_id: int = 0, limit: int = 50) -> list[dict]:
+def _read_messages(db: str, channel: str | None = None, since_id: int = 0,
+                   limit: int = 50, as_handle: str | None = None) -> list[dict]:
+    """Messages with id > since_id, oldest first. With `as_handle`: broadcast + mail
+    addressed to that handle (channel given), or directed-only across all channels
+    (channel omitted; broadcasts excluded — backs the ambient watcher). Without
+    `as_handle`: v1 behavior (everything on `channel`)."""
     limit = max(1, min(limit, MAX_LIMIT))
+    conds = ["id > ?"]
+    params: list = [since_id]
+    if channel is not None:
+        conds.append("channel = ?")
+        params.append(channel)
+    if as_handle is not None:
+        if channel is not None:
+            conds.append("(recipient IS NULL OR recipient = ?)")
+        else:
+            conds.append("recipient = ?")
+        params.append(as_handle)
+    sql = "SELECT * FROM messages WHERE " + " AND ".join(conds) + " ORDER BY id LIMIT ?"
+    params.append(limit)
     with _connect(db) as c:
-        rows = c.execute(
-            "SELECT * FROM messages WHERE channel=? AND id>? ORDER BY id LIMIT ?",
-            (channel, since_id, limit),
-        ).fetchall()
+        rows = c.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -134,42 +141,65 @@ def _list_channels(db: str) -> list[dict]:
     ]
 
 
-async def _wait_for_message(
-    db: str, channel: str, since_id: int = 0, timeout: float = 600.0, poll: float = 0.5
-) -> list[dict]:
-    """Long-poll: block until a message with id > since_id exists on channel, then return
-    those rows. Return [] if `timeout` seconds elapse first. `poll` is the re-check interval;
-    `await asyncio.sleep` yields the event loop so other sessions' posts/reads aren't starved.
-    Stays stateless about consumers — the cursor is still the caller's `since_id`."""
+def _register(db: str, handle: str, repo: str | None = None,
+              status: str = "online", current_task: str | None = None) -> dict:
+    """Upsert a session row (discovery/presence only — never consulted by routing).
+    Bumps last_seen; preserves existing repo/current_task when the new value is None."""
+    if not handle:
+        return {"error": "handle is required"}
+    with _connect(db) as c:
+        c.execute(
+            """INSERT INTO sessions(handle, repo, status, current_task)
+               VALUES (?,?,?,?)
+               ON CONFLICT(handle) DO UPDATE SET
+                   status       = excluded.status,
+                   repo         = COALESCE(excluded.repo, sessions.repo),
+                   current_task = COALESCE(excluded.current_task, sessions.current_task),
+                   last_seen    = datetime('now')""",
+            (handle, repo, status, current_task),
+        )
+    return {"handle": handle, "status": status}
+
+
+def _touch(db: str, handle: str) -> None:
+    """Bump last_seen for a handle (liveness heartbeat from the long-poll). No-op if absent."""
+    with _connect(db) as c:
+        c.execute("UPDATE sessions SET last_seen=datetime('now') WHERE handle=?", (handle,))
+
+
+def _list_sessions(db: str, ttl: int = PRESENCE_TTL) -> list[dict]:
+    """Connected sessions with effective status (offline if last_seen older than ttl)."""
+    with _connect(db) as c:
+        rows = c.execute(
+            """SELECT handle, repo, status, current_task, last_seen,
+                      CAST((julianday('now') - julianday(last_seen)) * 86400 AS INTEGER) AS age
+               FROM sessions ORDER BY handle"""
+        ).fetchall()
+    out = []
+    for r in rows:
+        status = "offline" if (r["age"] is not None and r["age"] > ttl) else r["status"]
+        out.append({"handle": r["handle"], "repo": r["repo"], "status": status,
+                    "current_task": r["current_task"], "last_seen": r["last_seen"]})
+    return out
+
+
+async def _wait_for_message(db: str, channel: str | None = None, since_id: int = 0,
+                            timeout: float = 600.0, poll: float = 0.5,
+                            as_handle: str | None = None) -> list[dict]:
+    """Long-poll for messages newer than since_id (inbox filter via as_handle, §4.2).
+    Bumps last_seen for as_handle each poll so a parked waiter stays 'online' in
+    list_sessions. `await asyncio.sleep` yields the loop so other sessions aren't starved.
+    Returns [] after `timeout` seconds."""
     elapsed = 0.0
     while elapsed < timeout:
-        rows = _read_messages(db, channel, since_id)
+        rows = _read_messages(db, channel, since_id, as_handle=as_handle)
         if rows:
             return rows
+        if as_handle is not None:
+            _touch(db, as_handle)
         await asyncio.sleep(poll)
         elapsed += poll
     return []
-
-
-def _watch_command(channel: str, since_id: int = 0, timeout: int = 600) -> dict:
-    """Build the backgroundable curl recipe for the /wait route. Pure string assembly — the
-    agent runs the returned command as a backgrounded shell command, so the WAIT happens in
-    that subprocess (0 model tokens while parked), not in a blocking tool call."""
-    url = (
-        f"http://{HOST}:{PORT}/wait"
-        f"?channel={quote(channel)}&since_id={since_id}&timeout={timeout}"
-    )
-    cmd = f'curl -s --max-time {timeout + 10} "{url}"'
-    return {
-        "run_in_background": cmd,
-        "channel": channel,
-        "since_id": since_id,
-        "note": (
-            "Run the command in `run_in_background` as a BACKGROUNDED shell command, then keep "
-            "working. It prints {\"messages\":[...]} and exits when a newer message arrives. "
-            "Advance since_id to the newest id and call watch_channel again to keep listening."
-        ),
-    }
 
 
 # --- dev auto-reload (in-process; works WITH KeepAlive) --------------------
@@ -206,90 +236,76 @@ def _watch_source_and_exit(path: str, interval: float = 2.0) -> None:
 
 @mcp.tool()
 def usage() -> str:
-    """Explain what the contract-bus is for and how to use it. Call this first if you're
-    unsure whether/how to use this server — it returns the purpose, the channel/since_id
-    workflow, and when to post vs read."""
+    """Explain what contract-bus is and how to use it. Call first if unsure."""
     return _usage()
 
 
 @mcp.tool()
-def post_message(channel: str, author: str, body: str) -> dict:
-    """Publish a message/contract to a channel so the other Claude session can read it.
+def post_message(channel: str, author: str, body: str, to: str | None = None) -> dict:
+    """Publish a message to a channel so other Claude sessions can read it.
 
-    Use when you've decided something the other session needs — an API contract, a
-    schema, an answer to a question. `channel` is the shared feature thread (agree on a
-    name, e.g. "feature-checkout"). `author` is free-form ("backend"/"frontend").
-    Returns the new message's id and created_at.
+    `to` addresses one session by its handle (see list_sessions); omit it (to=None) to
+    broadcast to everyone on the channel. `author` is free-form. Returns id + created_at.
     """
-    return _post_message(DB, channel, author, body)
+    return _post_message(DB, channel, author, body, recipient=to)
 
 
 @mcp.tool()
-def read_messages(channel: str, since_id: int = 0, limit: int = 50) -> list[dict]:
-    """Read messages on a channel newer than since_id (oldest first), capped at limit.
-
-    Call at the start of work on a shared feature with since_id=0, then again later with
-    the highest id you've already seen to fetch only replies. Track that max id yourself
-    — the server stores no read state.
+def read_messages(channel: str | None = None, since_id: int = 0,
+                  limit: int = 50, as_handle: str | None = None) -> list[dict]:
+    """Read messages newer than since_id (oldest first). Pass as_handle=<your handle> to get
+    broadcasts plus mail addressed to you; omit channel (with as_handle) to read your mail
+    across all channels. Track the highest id yourself — no server-side read state.
     """
-    return _read_messages(DB, channel, since_id, limit)
+    return _read_messages(DB, channel, since_id, limit, as_handle=as_handle)
 
 
 @mcp.tool()
 def list_channels() -> list[dict]:
-    """List active channels with message counts and last id, to discover ongoing threads.
-
-    Use when you don't know the channel name, to see what conversations are in flight.
-    """
+    """List active channels with message counts and last id, to discover ongoing threads."""
     return _list_channels(DB)
 
 
 @mcp.tool()
-async def wait_for_message(channel: str, since_id: int = 0, timeout: int = 60) -> list[dict]:
-    """Block until a message newer than since_id arrives on a channel, then return it.
-
-    Use when you've posted and are waiting on the other session's reply and have NOTHING
-    else to do — this freezes the session until a message lands or `timeout` seconds pass
-    (then returns []). To wait while still working, use watch_channel instead. Track the
-    highest id you've seen and pass it as since_id; the server stores no read state.
-
-    RE-QUEUE ON TIMEOUT: a [] result means "nothing arrived yet," not "no reply is coming."
-    If you're still waiting, call wait_for_message again with the SAME since_id to keep
-    blocking. Repeat until you get a message (or decide to stop waiting).
-    """
-    return await _wait_for_message(DB, channel, since_id, min(timeout, MAX_WAIT))
-
-
-@mcp.tool()
-def watch_channel(channel: str, since_id: int = 0) -> dict:
-    """Listen for the next message on a channel WITHOUT blocking — returns a curl command
-    to run in the background.
-
-    Use when you want to be pinged with the other session's reply but keep working
-    meanwhile. Returns a dict whose `run_in_background` value is a shell command: run it as
-    a BACKGROUNDED command. It parks server-side and exits when a message newer than
-    since_id arrives, waking you with the reply as JSON. Then advance since_id to the newest
-    id and call watch_channel again to keep listening. Track the cursor yourself — the
-    server stores no read state.
-    """
-    return _watch_command(channel, since_id, MAX_WAIT)
+def list_sessions() -> list[dict]:
+    """List connected sessions: handle, repo, status (online/offline), and current_task.
+    Use to discover who is live and what they are working on before addressing them."""
+    return _list_sessions(DB)
 
 
 @mcp.custom_route("/wait", methods=["GET"])
 async def wait_route(request: Request) -> JSONResponse:
-    """Plain-HTTP long-poll endpoint (curl-able, so it can be backgrounded). Blocks until a
-    message with id > since_id lands on channel, then returns {"messages": [...]}; returns
-    {"messages": []} on timeout. Mounts at root /wait (not /mcp/wait)."""
-    channel = request.query_params.get("channel", "")
-    if not channel:
-        return JSONResponse({"error": "channel is required"}, status_code=400)
+    """Long-poll for mail. `as_handle` gives the inbox filter; `channel` optional when
+    `as_handle` is set (channel-agnostic mail). Returns {"messages":[...]}; 400 if neither
+    channel nor as_handle is given. Mounts at root /wait. Bumps last_seen for as_handle."""
+    channel = request.query_params.get("channel") or None
+    as_handle = request.query_params.get("as_handle") or None
+    if not channel and not as_handle:
+        return JSONResponse({"error": "channel or as_handle is required"}, status_code=400)
     try:
         since_id = int(request.query_params.get("since_id", 0))
         timeout = min(int(request.query_params.get("timeout", MAX_WAIT)), MAX_WAIT)
     except ValueError:
         return JSONResponse({"error": "since_id and timeout must be integers"}, status_code=400)
-    rows = await _wait_for_message(DB, channel, since_id, timeout)
+    rows = await _wait_for_message(DB, channel, since_id, timeout, as_handle=as_handle)
     return JSONResponse({"messages": rows})
+
+
+@mcp.custom_route("/register", methods=["POST"])
+async def register_route(request: Request) -> JSONResponse:
+    """Hook-facing presence upsert/heartbeat (POST, since it mutates). Accepts handle, repo,
+    status, current_task via query or form. Not an MCP tool — the model never registers."""
+    params = dict(request.query_params)
+    try:
+        params.update(dict(await request.form()))
+    except Exception:
+        pass
+    handle = params.get("handle")
+    if not handle:
+        return JSONResponse({"error": "handle is required"}, status_code=400)
+    res = _register(DB, handle, params.get("repo"),
+                    params.get("status", "online"), params.get("current_task"))
+    return JSONResponse(res)
 
 
 if __name__ == "__main__":

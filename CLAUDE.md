@@ -4,12 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Implemented. `bus_server.py` (logic + 6 MCP tools + a `/wait` HTTP route),
-`test_bus_server.py` (21 tests, all passing), `requirements.txt`, `README.md`, `.gitignore`,
+Implemented. `bus_server.py` (logic + 5 MCP tools + `/wait` and `/register` HTTP routes),
+`test_bus_server.py` (41 tests, all passing), `requirements.txt`, `README.md`, `.gitignore`,
 and macOS auto-start scripts
 (`install-service.sh` / `uninstall-service.sh`). The spec `mcp-contract-bus-spec.md`
-remains the design source of truth. Git repo on `main`, remote
+remains the v1 design source of truth. Git repo, remote
 `https://github.com/sid-k03/contract-bus`.
+
+**v2 (multitenancy + presence) — server layer landed.** Messages can be directed to one
+session (`recipient` column; `to=`/`as_handle` filters) or broadcast; a discovery-only
+`sessions` presence registry (`list_sessions`, `POST /register`) tracks who's connected and
+their `current_task`. Design + plans live in `docs/superpowers/`
+(`specs/2026-06-26-contract-bus-multitenancy-hooks-design.md`,
+`plans/2026-06-26-contract-bus-v2-server.md`). The **hook pack + skills + Claude-plugin
+packaging** that auto-derive handles, auto-register every session, and run the ambient
+"always-listening" watcher are the next plan (Plan 2) — not yet built.
 
 The auto-start scripts generate a per-user LaunchAgent `com.blocksurvey.contract-bus`
 (`~/Library/LaunchAgents/…plist`) with `RunAtLoad`+`KeepAlive`, pinning an absolute
@@ -48,41 +57,52 @@ SQLite. Session A `post_message(...)`; session B `read_messages(...)` sees it.
   `127.0.0.1:9100`; both sessions connect as HTTP clients to the same process + same
   SQLite file. Do not "simplify" this to stdio.
 
-- **Stateless about consumers.** The server stores no read/unread flags and no per-reader
-  state. The autoincrement `id` is the only cursor: a reader remembers the highest `id`
-  it has seen and passes it as `since_id` to fetch newer messages. The cursor lives in the
-  reading session's own context. Do not add server-side read tracking — it breaks this model.
+- **Stateless about routing.** The server stores no read/unread flags and no per-reader
+  cursor state. The autoincrement `id` is the only cursor: a reader remembers the highest
+  `id` it has seen and passes it as `since_id` to fetch newer messages. The cursor lives in
+  the reading session's own context. Addressing (`recipient`) is a **`WHERE`-clause filter**
+  (`recipient IS NULL OR recipient = ?`), not server state; the `sessions` presence registry
+  is **discovery-only and never consulted by routing**. Do not add server-side read tracking
+  or route via the registry — it breaks this model.
 
-- **Append-only log.** No edit, no delete. One SQLite table `messages(id, channel, author,
-  body, created_at)` with index on `(channel, id)`. WAL mode enabled at startup.
+- **Append-only log.** No edit, no delete. SQLite table `messages(id, channel, author, body,
+  created_at, recipient)` — `recipient` NULL = broadcast, else the addressee's handle. Plus a
+  `sessions(handle, repo, status, current_task, last_seen, registered_at)` presence table.
+  Indexes on `(channel, id)`, `(channel, recipient, id)`, `(recipient, id)`. WAL at startup.
+  `_init` migrates a v1 DB in place (adds the `recipient` column if absent) — idempotent.
 
-- **Tools:** the three spec tools — `post_message(channel, author, body)`,
-  `read_messages(channel, since_id=0, limit=50)`, `list_channels()` (exact return shapes
-  pinned in spec §6, match them) — plus a non-spec `usage()` self-doc tool and the two
-  push tools below (`wait_for_message`, `watch_channel`). Tool docstrings are load-bearing:
-  the model decides whether to call a tool from its description, so docstrings must state
-  *when* to call.
+- **Tools (lean 5-tool surface).** `post_message(channel, author, body, to=None)`,
+  `read_messages(channel=None, since_id=0, limit=50, as_handle=None)`, `list_channels()`,
+  `list_sessions()`, plus the non-spec `usage()` self-doc tool. (Exact `post`/`read`/`channels`
+  return shapes still match spec §6, now with `recipient`.) The old `wait_for_message` and
+  `watch_channel` MCP **tools were removed** — push is now the `/wait` route only (below), keeping
+  the model-facing surface minimal. Tool docstrings are load-bearing: the model decides whether
+  to call a tool from its description, so docstrings must state *when* to call.
 
 - **Push via bounded long-poll (deliberately relaxes spec §9's "no push" non-goal).** A
   turn-based agent can't act on MCP `notifications/*` — the model only acts when it gets a
   turn, and a notification arriving mid-idle wakes nothing. The only thing that turns "new
   message" into "agent acts" is a tool/HTTP result, because a result IS a turn. So push is a
-  **blocking long-poll**: `_wait_for_message` re-runs the `read_messages` query every `poll`
-  seconds (default 0.5) until `id > since_id` exists or `MAX_WAIT`=600s elapses, returning
-  []. It uses `await asyncio.sleep` so a parked waiter does NOT starve other sessions'
-  posts/reads (verified e2e). Crucially this stays **stateless about consumers** — the
-  cursor is still the caller's `since_id`, no server-side read state. Two surfaces share the
-  one helper:
-  - `wait_for_message` MCP tool — synchronous; blocks the calling session until a reply.
+  **long-poll**: `_wait_for_message` re-runs the inbox `read_messages` query every `poll`
+  seconds (default 0.5) until matching mail exists or `MAX_WAIT`=600s elapses, returning [].
+  It uses `await asyncio.sleep` so a parked waiter does NOT starve other sessions'
+  posts/reads (verified e2e), and bumps the waiter's `last_seen` each poll so a parked-but-alive
+  session never ages out of presence. Crucially this stays **stateless about routing** — the
+  cursor is still the caller's `since_id`. Exposed via one surface:
   - `/wait` **plain-HTTP route** (mounts at root `/wait`, NOT `/mcp/wait` — confirmed on
-    fastmcp 3.4.2 via `@mcp.custom_route`) — curl-able, so a session can run it as a
-    backgrounded shell command and keep working; the curl exits when a message lands, which
-    wakes the agent (this is how you get "background like a long bash command"). 0 model
-    tokens are spent while a long-poll is parked — cost is one turn per return, so a LONG
-    timeout is cheaper (fewer re-entries), not more expensive.
-  - `watch_channel` MCP tool — a **directive tool**: it does no waiting itself, it returns
-    the exact backgroundable `curl` command (via `_watch_command`) for the agent to run.
-    The server stays dumb; the harness's existing background-bash machinery does the waiting.
+    fastmcp 3.4.2 via `@mcp.custom_route`). `GET /wait?as_handle=<h>[&channel=…]&since_id=…&timeout=…`;
+    `400` if neither `channel` nor `as_handle` given. Curl-able, so a session runs it as a
+    backgrounded shell command and keeps working; the curl exits when mail lands, waking the
+    agent ("background like a long bash command"). 0 model tokens while parked — cost is one
+    turn per return, so a LONG timeout is cheaper (fewer re-entries), not more expensive. This
+    is hook-only (the model never curls); it's a route, not a tool, to keep the surface lean.
+
+- **Presence registry (`POST /register`).** Discovery-only: upserts a `sessions` row (handle,
+  repo, status, current_task) and heartbeats `last_seen`. `list_sessions()` reports each
+  session's effective status — `offline` once `last_seen` is older than `PRESENCE_TTL`=900s,
+  deliberately > `MAX_WAIT` so a long-polling session never flips offline mid-wait. `/register`
+  is a POST route (it mutates) and **not** an MCP tool — only the hook layer registers, never
+  the model.
 
 - **Self-documentation (two channels, one source).** A single `GUIDE` string is both passed
   as FastMCP `instructions=` (pushed to every client during the `initialize` handshake, so
@@ -127,7 +147,7 @@ Or per-repo `.mcp.json`:
 **HTTP** transport, a running session does NOT need a full restart to recover the connection:
 - When the daemon restarts (auto-reload, reinstall, crash-respawn), connected sessions
   **auto-reconnect** with exponential backoff (5 attempts, ~31s) and re-run `tools/list`, so
-  new tools (`wait_for_message`, `watch_channel`) appear without restarting the session.
+  tool-surface changes (e.g. the new `list_sessions`) appear without restarting the session.
 - Force it immediately with the slash command **`/mcp reconnect contract-bus`** (a space —
   it is NOT `/mcp-reconnect`).
 - The server also supports `list_changed`, so tool-list changes can propagate with no
@@ -146,12 +166,13 @@ helpers. Async helpers (`_wait_for_message`) are tested from sync tests via `asy
 with a fast `poll=0.01`, driving the mid-wait insert from an `asyncio.create_task` — no
 `pytest-asyncio` dependency.
 
-Unit tests alone CANNOT prove the `/wait` route mounts where you think or that a parked
-long-poll doesn't starve other requests (the helper test passes regardless). Those are
-build-time e2e checks: boot the daemon, then (a) curl `/wait` to confirm the root mount, and
-(b) park a backgrounded curl on `/wait` while a `fastmcp.Client` posts — assert the curl
-wakes with the message AND a concurrent `list_channels` returns fast. Re-run these if the
-fastmcp version or the route/async wiring changes.
+Unit tests alone CANNOT prove the `/wait` and `/register` routes mount where you think or
+that a parked long-poll doesn't starve other requests (the helper test passes regardless).
+Those are build-time e2e checks: boot the daemon on an alt port + temp DB (so the live
+LaunchAgent on 9100 is undisturbed), then (a) `POST /register` and assert `{"handle","status"}`,
+(b) `GET /wait` with neither `channel` nor `as_handle` → `400`, and (c) post a directed message
+and assert `GET /wait?as_handle=…` wakes with it. (See Plan 1 Task 6 Step 5 for the exact
+one-liner.) Re-run these if the fastmcp version or the route/async wiring changes.
 
 ## Non-negotiables from the spec
 
@@ -159,9 +180,15 @@ fastmcp version or the route/async wiring changes.
 - Always use bound SQL parameters; never string-format SQL.
 - Validate minimally: non-empty `channel` and `body`; clamp `limit` to a max (e.g. 200).
   On bad input return a clear error dict, don't raise raw.
-- Explicit non-goals (do not add): content/schema validation, auth, multi-user, message
-  deletion/editing, multi-machine support. **Exception, consciously taken:** spec §9 also
-  lists "push/notifications" as out — we relaxed *that one* via the bounded long-poll above
-  (`wait_for_message` / `watch_channel` / `/wait`). It's the least-invasive form: no
-  consumer state, append-only intact, localhost/no-auth unchanged. Do NOT delete it as
-  "spec drift" — it is intentional. The OTHER non-goals still stand.
+- Explicit non-goals (do not add): content/schema validation, auth, message deletion/editing,
+  multi-machine support. **Two exceptions, consciously taken** (do NOT delete either as "spec
+  drift" — both are intentional):
+  1. **Push/notifications** (spec §9 lists it as out) — relaxed via the bounded long-poll
+     above (the `/wait` route). Least-invasive: no consumer cursor state, append-only intact,
+     localhost/no-auth unchanged.
+  2. **Multitenancy / per-session addressing** (spec's "multi-user" non-goal) — relaxed via
+     the `recipient` filter + discovery-only `sessions` presence registry. Routing stays
+     stateless (addressing is a WHERE clause; the registry is never consulted by routing),
+     append-only intact, still single-host/localhost/no-auth.
+
+  The OTHER non-goals (content/schema validation, auth, edit/delete, multi-machine) still stand.

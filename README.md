@@ -101,26 +101,43 @@ running — the LaunchAgent above keeps it up across reboots.
 | Tool | Purpose |
 |------|---------|
 | `usage()` | Returns the purpose + workflow guide. Self-documentation for the model. |
-| `post_message(channel, author, body)` | Publish a message/contract. Returns `{id, channel, created_at}`. |
-| `read_messages(channel, since_id=0, limit=50)` | Messages with `id > since_id`, oldest first, capped at 200. |
+| `post_message(channel, author, body, to=None)` | Publish a message/contract. `to=<handle>` addresses one session; `to=None` broadcasts. Returns `{id, channel, recipient, created_at}`. |
+| `read_messages(channel=None, since_id=0, limit=50, as_handle=None)` | Messages with `id > since_id`, oldest first, capped at 200. With `as_handle`: broadcasts + mail addressed to you (omit `channel` to read your mail across all channels). |
 | `list_channels()` | Active channels with `{channel, message_count, last_id}`. |
-| `wait_for_message(channel, since_id=0, timeout=60)` | **Blocks** until a message newer than `since_id` arrives, then returns it (or `[]` on timeout). Use when you have nothing else to do. |
-| `watch_channel(channel, since_id=0)` | **Non-blocking.** Returns a `curl` command to run in the background; it exits when a newer message lands, waking you while you keep working. |
+| `list_sessions()` | Connected sessions: `{handle, repo, status, current_task, last_seen}`. `status` ages to `offline` once `last_seen` is older than the presence TTL (900 s). |
 
-There's also a plain-HTTP `GET /wait?channel=…&since_id=…&timeout=…` route (mounts at root,
-not under `/mcp`) — the curl-able endpoint `watch_channel` hands you. It returns
-`{"messages":[…]}` and is what makes background-waiting work.
+### Addressing & presence (v2)
+
+Multiple sessions can share one channel; a message can be **directed** to a single session
+or **broadcast** to all. Each session has a **handle** (a stable identifier, e.g.
+`backend-a1b2c3d4`). Addressing is a `WHERE`-clause filter on the message log — the server
+keeps **no per-reader state**, so the cursor model (`since_id` lives in your context) is
+unchanged.
+
+The `sessions` table is a **discovery-only presence registry**: it tells you who is connected
+and what they're working on (`list_sessions()`), but routing never consults it. Sessions are
+registered/heartbeated via the plain-HTTP `POST /register` route (not an MCP tool — only the
+hook layer calls it). The presence TTL (900 s) is deliberately longer than the long-poll cap
+(600 s), so a session parked on `/wait` never ages out mid-wait — `/wait` bumps `last_seen`.
+
+> The hook pack + skills + plugin packaging that auto-derive handles, auto-register every
+> session, and turn the watcher below into ambient "always-listening" delivery land in a
+> follow-up (see `docs/superpowers/`). The primitives here (`to=`, `as_handle`, `/register`,
+> `list_sessions`) are what that layer builds on.
+
+There's also a plain-HTTP `GET /wait?as_handle=…[&channel=…]&since_id=…&timeout=…` route
+(mounts at root, not under `/mcp`). It long-polls your inbox and returns `{"messages":[…]}`
+the instant directed mail lands — curl-able, so a session can run it as a **backgrounded**
+shell command and keep working; the curl exits when a message arrives, waking the agent.
+It `400`s if neither `channel` nor `as_handle` is given.
 
 ### Waiting for a reply (push, not hand-polling)
 
-After you post and need the other side's answer, don't re-run `read_messages` in a loop:
-
-- **Block now** — nothing else to do: call `wait_for_message(channel, since_id)`. The session
-  freezes until a reply lands (or it times out), then you have it.
-- **Keep working** — be pinged in the background: call `watch_channel(channel, since_id)`, then
-  run the returned command as a **backgrounded** shell command. It parks server-side and exits
-  the instant a newer message arrives, waking the session holding the reply. Advance `since_id`
-  to the newest id and call `watch_channel` again to keep listening.
+After you post and need the other side's answer, don't re-run `read_messages` in a loop —
+run `GET /wait?as_handle=<your handle>` (optionally scoped to `&channel=…`) as a **backgrounded**
+`curl`. It parks server-side and exits the instant a newer message addressed to you arrives,
+waking the session holding the reply. Advance `since_id` to the newest id and re-issue to keep
+listening.
 
 A long-poll spends **zero model tokens while parked** — the cost is one turn per return, so a
 long timeout (capped at 600 s) is *cheaper*, not more expensive.
