@@ -75,3 +75,31 @@ def test_watcher_alive_false_on_starttime_mismatch(tmp_path):
 def test_watcher_alive_false_when_absent(tmp_path):
     sid = "s"; os.makedirs(c.state_dir(sid, root=str(tmp_path)))
     assert c.watcher_alive(sid, root=str(tmp_path)) is False
+
+
+# --- daemon liveness probe + register (live temp daemon on alt port) -------
+
+import threading, time  # noqa: E402
+
+
+def _boot_daemon(tmp_path, port):
+    import bus_server as b
+    b.PORT = port; b.DB = str(tmp_path / "e2e.sqlite3"); b._init(b.DB)
+    threading.Thread(target=lambda: b.mcp.run(transport="http", host="127.0.0.1", port=port),
+                     daemon=True).start()
+    time.sleep(2.5)
+    return b
+
+
+def test_daemon_up_false_when_down():
+    c.BASE = "http://127.0.0.1:9131"   # nothing listening
+    assert c.daemon_up(timeout=1.0) is False
+
+
+def test_daemon_up_and_register_roundtrip(tmp_path):
+    b = _boot_daemon(tmp_path, 9132)
+    c.BASE = "http://127.0.0.1:9132"
+    assert c.daemon_up(timeout=2.0) is True
+    assert c.register("backend-1", repo="backend", current_task="checkout") is True
+    sessions = b._list_sessions(b.DB)
+    assert any(s["handle"] == "backend-1" and s["current_task"] == "checkout" for s in sessions)

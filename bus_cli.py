@@ -112,3 +112,33 @@ def watcher_alive(session_id: str, root: str = STATE_ROOT) -> bool:
         return False
     current_st = _proc_starttime(pid)
     return current_st is not None and _norm(current_st) == _norm(recorded_st)
+
+
+# --- daemon liveness + register (graceful degradation; never raises) -------
+
+def daemon_up(timeout: float = CONNECT_TIMEOUT) -> bool:
+    """True iff the v2 daemon answers. GET /wait with no args returns 400 on v2."""
+    try:
+        urllib.request.urlopen(f"{BASE}/wait", timeout=timeout)
+        return True  # 200 (shouldn't happen without args) still means it's up
+    except urllib.error.HTTPError as e:
+        return e.code == 400
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def register(handle: str, repo: str | None = None, status: str = "online",
+             current_task: str | None = None, timeout: float = CONNECT_TIMEOUT) -> bool:
+    """POST /register. True on 200; never raises (graceful degradation)."""
+    fields = {"handle": handle, "status": status}
+    if repo is not None:
+        fields["repo"] = repo
+    if current_task is not None:
+        fields["current_task"] = current_task
+    data = urllib.parse.urlencode(fields).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(f"{BASE}/register", data=data),
+                                    timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
