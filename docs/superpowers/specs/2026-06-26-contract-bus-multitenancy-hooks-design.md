@@ -386,7 +386,7 @@ must position the bus as complementary, not competing.
 | Dimension | Agent teams | contract-bus |
 |---|---|---|
 | Sessions | Lead **spawns** ephemeral teammates | Connects **pre-existing, independent** sessions |
-| Lifespan | Die with lead; one team/session; no `/resume` of teammates | **Durable** — survive restart/crash/resume |
+| Lifespan | Die with lead; one team/session; no `/resume` of teammates | **Durable mail** (SQLite persists; offline delivery) + sessions survive **restart/`--resume`**. A *crash* yields a new `session_id`→new handle, so address peers by their current handle from `list_sessions()` (or a human alias), not last session's. |
 | Workspace | Effectively single workspace | **Cross-repo**, each its own CLAUDE.md |
 | Topology | Hub-and-spoke, fixed lead | **Peer-to-peer**, leaderless |
 | Transport | In-memory mailbox + shared task list (`~/.claude/teams`,`tasks`) | HTTP daemon + **append-only SQLite** |
@@ -518,6 +518,29 @@ These supersede the matching parts of §4.3/§5/§6 where they conflict.
   re-arm with advanced `since_id` (no re-delivery); watcher-wrapper-owned cursor advances
   correctly. Still to live-test with an **external observer**: the Stop-backstop reviving a
   *dropped* watcher from idle (a session can't observe its own idle-wake failure).
+
+### Second-adversary hardenings + the irreducible idle-wake limit (2026-06-26)
+A second adversarial pass on the "self-healing watcher" the user asked for. **Conclusion: true
+external KeepAlive is impossible here.** In an idle session, only (a) an agent-launched task
+completing or (b) human input creates a turn; no hook/daemon/launchd can manufacture one (that
+is the rejected `claude/channel` push). So idle-wake cannot be fully self-healing — a
+no-notification death, or one missed model relaunch from full idle, pauses watching until the
+next human message. Document this; do **not** claim "respawn for any reason."
+- **The robust path for "nothing to do but wait" is the blocking `wait_for_message` tool** (a
+  tool result *is* a turn — documented, no dependence on the undocumented wake). The watcher is
+  only for "keep working while listening." Skills/GUIDE bias accordingly. This makes the common
+  "backend waits for delegation" case rest on the robust mechanism, not the flaky one.
+- **Three plan defects fixed (see Plan 2 "Plan revisions"):** (1) `bus_watch.sh` now writes
+  `watcher.pid` (it never did → liveness was always "dead" → re-inject on *every* Stop); the
+  Stop supervisor checks it for real. (2) The `daemon_up()` **hard-bail is replaced by a time
+  throttle** (30s, 120s while down) — the hard-bail created *permanent* idle-wake death during
+  the repo's own auto-reload flaps; the throttle makes a flap a *bounded, self-recovering*
+  storm. (3) `watch_command`/`launch_directive` carry `session_id` so the watcher can key its
+  pid file. The 8-continuation cap does **not** bound a flap-storm (those are fresh
+  `task-notification` turns, not continuation chains) — the throttle is what bounds it.
+- **Still unverified (live-test in Plan 2 Task 9, external observer):** does a `kill -9`'d /
+  parent-died background task still fire `task-notification`? (If not, that is a silent-death
+  class with no in-session recovery.) Resume re-arm likely waits for the human's first prompt.
 
 ---
 
