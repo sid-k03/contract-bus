@@ -526,10 +526,16 @@ completing or (b) human input creates a turn; no hook/daemon/launchd can manufac
 is the rejected `claude/channel` push). So idle-wake cannot be fully self-healing — a
 no-notification death, or one missed model relaunch from full idle, pauses watching until the
 next human message. Document this; do **not** claim "respawn for any reason."
-- **The robust path for "nothing to do but wait" is the blocking `wait_for_message` tool** (a
-  tool result *is* a turn — documented, no dependence on the undocumented wake). The watcher is
-  only for "keep working while listening." Skills/GUIDE bias accordingly. This makes the common
-  "backend waits for delegation" case rest on the robust mechanism, not the flaky one.
+- **Cost correction (live-observed 2026-06-26).** Earlier drafts wrongly billed the blocking
+  `wait_for_message` *tool* as the cheap "robust floor." A live session proved otherwise: the
+  tool **occupies** the session (shows busy/"Scampering") and **each timeout re-queue is a
+  token-costing turn** — it does NOT free the shell or sit at 0 tokens. The **backgrounded
+  watcher is the efficient default**: the model's turn ends → the session goes idle and free at
+  0 tokens → mail wakes it. So the recommendation hierarchy is **watcher = preferred** (free,
+  idle, 0 tokens, for both work-while-listening and pure-wait); **`wait_for_message(timeout=600)`
+  = documented fallback only** (blocks/occupies; use a long timeout to minimise re-queue turns;
+  reach for it solely when the undocumented background wake seems unreliable or a hard guarantee
+  is wanted). "0 tokens while parked" applies to the backgrounded curl/watcher, NOT the tool.
 - **Three plan defects fixed (see Plan 2 "Plan revisions"):** (1) `bus_watch.sh` now writes
   `watcher.pid` (it never did → liveness was always "dead" → re-inject on *every* Stop); the
   Stop supervisor checks it for real. (2) The `daemon_up()` **hard-bail is replaced by a time

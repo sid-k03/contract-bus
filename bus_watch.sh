@@ -14,4 +14,7 @@ trap 'rm -f "$d/watcher.pid"' EXIT
 resp="$(curl -s --max-time 610 "$base/wait?as_handle=$handle&since_id=$since&timeout=600")"
 printf '%s\n' "$resp"
 maxid="$(printf '%s' "$resp" | python3 -c "import sys,json;d=json.load(sys.stdin);print(max((m['id'] for m in d.get('messages',[])), default=$since))" 2>/dev/null || echo "$since")"
+# Own the cursor FILE (not just stdout): a hook-injected re-arm directive reads since_id from
+# this file (bus_cli.read_cursor), so it must be current or old mail re-delivers. Atomic write.
+printf '%s' "$maxid" > "$d/cursor.tmp" && mv "$d/cursor.tmp" "$d/cursor"
 printf 'CURSOR=%s\n' "$maxid"

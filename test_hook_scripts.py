@@ -56,5 +56,8 @@ def test_watch_writes_pid_then_wakes_and_emits_cursor(tmp_path):
     assert "CURSOR=" in out
     cur = int([l for l in out.splitlines() if l.startswith("CURSOR=")][0].split("=")[1])
     assert cur >= 1
+    # the watcher OWNS the cursor file (so a hook-injected re-arm resumes at the right id)
+    with open(os.path.join(state, "sW", "cursor")) as f:
+        assert int(f.read().strip()) == cur
     # trap removed the pid file on exit
     assert not os.path.exists(os.path.join(state, "sW", "watcher.pid"))

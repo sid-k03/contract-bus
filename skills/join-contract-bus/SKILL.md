@@ -22,14 +22,18 @@ It prints a directive containing your handle and the exact watcher command. (`CL
 is the same id the hooks receive, so the state dir the skill creates and the dir the hooks
 check are identical.)
 
-## Listen for mail — pick the right mechanism
-- **If your only job is to wait for delegation** (nothing else to do): loop the blocking tool
-  `wait_for_message(as_handle=<your handle>)`. A tool result is a turn — this is the **robust,
-  documented** path; use it for "I'm just waiting for work."
-- **If you want to keep working while listening:** run the watcher command from the directive
-  as a BACKGROUND shell command, and **re-run it with the latest `CURSOR=<id>`** each time it
-  returns. This is best-effort (idle-wake rests on background-task completion); if it ever
-  stalls, your next `wait_for_message` call or a human message resumes it.
+## Listen for mail — prefer the watcher (it keeps your session FREE)
+- **DEFAULT — the background watcher.** Run the watcher command from the join directive as a
+  BACKGROUND shell command, and **re-run it with the latest `CURSOR=<id>`** each time it
+  returns. Your turn then ends, your session goes **idle and free** (you can do other work or
+  just sit at 0 tokens), and the watcher wakes you only when mail addressed to you lands. This
+  is the efficient path for both "keep working while listening" AND "just waiting for work."
+- **FALLBACK — `wait_for_message(as_handle=<you>, timeout=600)`.** This **blocks and occupies**
+  this session (it shows busy / "Scampering", and every timeout return is a fresh turn that
+  costs tokens — so use `timeout=600`, not a short value). Its only advantage is being fully
+  documented/guaranteed. Reach for it **only** if the background watcher's wake ever seems
+  unreliable or you specifically want a hard block. Do **not** default to it — it is the
+  token-hungry, session-occupying option.
 
 ## Participate
 - Your handle (e.g. `backend-a1b2c3d4`) is your address. Find peers with `list_sessions()`.

@@ -157,12 +157,16 @@ registers a handle, announces its `current_task`, and starts listening for direc
 manual polling. Hooks are **dormant by default**: a session that never joins pays one
 file-stat per event (a tiny POSIX gate, no Python) and nothing else.
 
-Two listening modes (the join skill picks per situation):
-- **Just waiting for work** → loop the blocking `wait_for_message(as_handle=…)` tool. A tool
-  result is a turn — the **robust, documented** path.
-- **Working while listening** → a background watcher (`bus_watch.sh`) the model launches; only
-  an agent-launched background task can wake an idle session, so the model owns it and the
-  `Stop` hook supervises/re-arms it (throttled, so an auto-reload flap can't storm it).
+Two listening modes:
+- **Default → background watcher** (`bus_watch.sh`, launched by the model). The model's turn
+  ends, so the session goes **idle and free at 0 tokens**, and an agent-launched background
+  task is the only thing that can wake an idle session — so the model owns it and the `Stop`
+  hook supervises/re-arms it (throttled, so an auto-reload flap can't storm it). This is the
+  efficient path whether you're working or just waiting.
+- **Fallback → `wait_for_message(as_handle=…, timeout=600)`** (blocking MCP tool). Fully
+  documented/guaranteed, but it **blocks and occupies** the session (shows busy; each timeout
+  re-queue is a token-costing turn). Use only if the background wake seems unreliable — it is
+  *not* the cheap option, despite blocking server-side.
 
 Tear down with the `conclude-bus-session` skill (offline + remove local state). **Honest
 limit:** idle-wake via the watcher rests on background-task completion (undocumented Claude
