@@ -16,9 +16,37 @@ session (`recipient` column; `to=`/`as_handle` filters) or broadcast; a discover
 `sessions` presence registry (`list_sessions`, `POST /register`) tracks who's connected and
 their `current_task`. Design + plans live in `docs/superpowers/`
 (`specs/2026-06-26-contract-bus-multitenancy-hooks-design.md`,
-`plans/2026-06-26-contract-bus-v2-server.md`). The **hook pack + skills + Claude-plugin
-packaging** that auto-derive handles, auto-register every session, and run the ambient
-"always-listening" watcher are the next plan (Plan 2) — not yet built.
+`plans/2026-06-26-contract-bus-v2-server.md`).
+
+**v2 hook pack — landed (Plan 2, `plans/2026-06-26-contract-bus-v2-hooks.md`).** `bus_cli.py`
+(hook brain), `bus_gate.sh` (fast POSIX activation stub — no Python until opted in),
+`bus_watch.sh` (model-launched re-arming watcher that writes its own `watcher.pid`), 3 skills
+(`join-contract-bus`/`orchestrating-contract-bus-sessions`/`conclude-bus-session`), and global
+`~/.claude/settings.json` wiring via `install-hooks.sh` (+ `hooks.settings.snippet.json`). State
+per session under `~/.contract-bus/<session_id>/` (`active`/`identity`/`cursor`/`watcher.pid`);
+the handle is derived once at join from `git rev-parse --show-toplevel`. **Idle-wake is
+model-owned** (only an agent-launched background task wakes an idle session — verified live);
+the `Stop` hook supervises/re-arms the watcher with a **time throttle** (30s; 120s while the
+daemon is down) so an auto-reload flap can't storm it, and the blocking `wait_for_message` tool
+is the documented floor for pure-wait. Skills call `bus_cli.py join-cli`/`conclude-cli` using
+`$CLAUDE_CODE_SESSION_ID`. **Stale-tool-schema caveat:** a connected session may keep the old
+tool surface after a daemon hot-reload — restart the session or `/mcp reconnect contract-bus`.
+
+**Validated end-to-end in real cross-session use (2026-06-26).** Two live Claude Code sessions
+in the same repo: auto-join via hook+skill (handles derived, registered), directed routing,
+idle-wake by background watcher **both directions** + by `wait_for_message`, full round-trip
+with no human relay. The live run also caught two bugs the 69 unit tests missed — fixed +
+re-validated: (1) the watcher must write the **cursor file** (a Stop-injected re-arm reads
+`since_id` from it; was always 0 → re-delivery), (2) the blocking `wait_for_message` **tool
+occupies the session and costs a turn per timeout re-queue** — it is NOT "0 tokens/idle"; the
+**backgrounded watcher is the efficient default** (turn ends → session idle/free), with
+`wait_for_message(timeout=600)` the documented fallback. Confirmed live: the Stop supervisor
+re-injects only when `watcher_alive` is false (silent with a live watcher → no flap-storm), and
+a SIGKILL'd background task still fires a `task-notification` (so kill-death is recoverable;
+only parent-`claude` death is the silent class).
+
+**Plugin packaging** (`.claude-plugin`/`hooks.json`/`.mcp.json` + flock `ensure-daemon`,
+LaunchAgent → optional) is the next plan (Plan 3) — not yet built.
 
 The auto-start scripts generate a per-user LaunchAgent `com.blocksurvey.contract-bus`
 (`~/Library/LaunchAgents/…plist`) with `RunAtLoad`+`KeepAlive`, pinning an absolute

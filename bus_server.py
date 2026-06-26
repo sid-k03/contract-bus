@@ -42,6 +42,9 @@ across different repos (e.g. backend + frontend) without a human relaying messag
   highest id you've seen as since_id — the server keeps no read state.
 - list_channels(): active channels. list_sessions(): who's connected, their status and
   current_task.
+- wait_for_message(channel=None, since_id=0, as_handle=<you>): BLOCK until newer mail for you
+  arrives (or timeout → []), when you have nothing to do but wait. Re-call with the same
+  since_id to keep waiting.
 
 Call usage() to re-read this."""
 
@@ -271,6 +274,22 @@ def list_sessions() -> list[dict]:
     """List connected sessions: handle, repo, status (online/offline), and current_task.
     Use to discover who is live and what they are working on before addressing them."""
     return _list_sessions(DB)
+
+
+@mcp.tool()
+async def wait_for_message(channel: str | None = None, since_id: int = 0,
+                           timeout: int = 60, as_handle: str | None = None) -> list[dict]:
+    """BLOCK until a message newer than since_id arrives, then return it (or [] on timeout).
+
+    The documented way to wait when you have NOTHING else to do — it freezes this session
+    until mail lands. Pass as_handle=<your handle> for broadcasts + mail addressed to you
+    (omit channel to wait on your mail across all channels). To keep working while you wait,
+    launch the ambient watcher instead (the join-contract-bus skill explains it).
+
+    RE-QUEUE ON TIMEOUT: [] means "nothing yet," not "no reply is coming" — call again with
+    the SAME since_id to keep waiting. Track the highest id yourself; no server read state.
+    """
+    return await _wait_for_message(DB, channel, since_id, min(timeout, MAX_WAIT), as_handle=as_handle)
 
 
 @mcp.custom_route("/wait", methods=["GET"])

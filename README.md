@@ -148,6 +148,35 @@ The same guide is also sent as the server's MCP **`instructions`** during the `i
 handshake, so a connecting Claude Code session learns what the bus is for and how to use it
 **without calling any tool**. The `usage()` tool is the on-demand version of the same text.
 
+## Auto-coordination (hooks)
+
+Installed once (`./install-hooks.sh` — wires global `~/.claude/settings.json` and links the 3
+skills into `~/.claude/skills/`), contract-bus
+hooks make a session **auto-join on request**: tell Claude "this task needs the bus" and it
+registers a handle, announces its `current_task`, and starts listening for directed mail — no
+manual polling. Hooks are **dormant by default**: a session that never joins pays one
+file-stat per event (a tiny POSIX gate, no Python) and nothing else.
+
+Two listening modes:
+- **Default → background watcher** (`bus_watch.sh`, launched by the model). The model's turn
+  ends, so the session goes **idle and free at 0 tokens**, and an agent-launched background
+  task is the only thing that can wake an idle session — so the model owns it and the `Stop`
+  hook supervises/re-arms it (throttled, so an auto-reload flap can't storm it). This is the
+  efficient path whether you're working or just waiting.
+- **Fallback → `wait_for_message(as_handle=…, timeout=600)`** (blocking MCP tool). Fully
+  documented/guaranteed, but it **blocks and occupies** the session (shows busy; each timeout
+  re-queue is a token-costing turn). Use only if the background wake seems unreliable — it is
+  *not* the cheap option, despite blocking server-side.
+
+Tear down with the `conclude-bus-session` skill (offline + remove local state). **Honest
+limit:** idle-wake via the watcher rests on background-task completion (undocumented Claude
+Code behavior, guarded by a build-time canary); if it ever stalls, a `wait_for_message` call
+or a human message resumes it. True external "KeepAlive" isn't possible without an external
+push into the session. See `docs/superpowers/specs/2026-06-26-contract-bus-multitenancy-hooks-design.md`.
+
+State per session lives under `~/.contract-bus/<session_id>/`. Plugin packaging
+(`/plugin install`) is the next step.
+
 ## Tests
 
 ```bash
