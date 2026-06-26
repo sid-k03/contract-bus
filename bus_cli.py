@@ -21,7 +21,7 @@ import urllib.request
 
 HOST = "127.0.0.1"
 PORT = 9100
-BASE = f"http://{HOST}:{PORT}"
+BASE = os.environ.get("CONTRACT_BUS_BASE", f"http://{HOST}:{PORT}")
 CONNECT_TIMEOUT = 2.0
 STATE_ROOT = os.environ.get("CONTRACT_BUS_STATE", os.path.expanduser("~/.contract-bus"))
 STATE_TTL_DAYS = 7
