@@ -113,10 +113,14 @@ def test_usage_guide_explains_purpose_and_workflow():
     g = bus._usage()
     assert isinstance(g, str)
     low = g.lower()
-    # purpose + the three tools + the cursor concept must all be discoverable
-    for term in ("contract", "post_message", "read_messages", "list_channels",
-                 "wait_for_message", "watch_channel", "since_id", "channel"):
+    for term in ("contract-bus", "post_message", "read_messages",
+                 "list_channels", "list_sessions", "since_id", "to=", "as_handle"):
         assert term in low, f"usage guide missing {term!r}"
+
+
+def test_list_sessions_tool_helper_present():
+    # the model-facing surface exposes list_sessions
+    assert hasattr(bus, "list_sessions")
 
 
 def test_server_instructions_set_for_handshake_discovery():
@@ -162,25 +166,6 @@ def test_wait_for_message_ignores_messages_at_or_below_since_id(db):
     assert rows == []
 
 
-# --- watch_channel (directive: build the backgroundable curl) --------------
-
-def test_watch_command_builds_background_curl(db):
-    out = bus._watch_command("feature-checkout", 42)
-    cmd = out["run_in_background"]
-    assert "curl" in cmd
-    assert "/wait" in cmd
-    assert "channel=feature-checkout" in cmd
-    assert "since_id=42" in cmd
-    assert str(bus.PORT) in cmd
-
-
-def test_watch_command_urlencodes_channel(db):
-    out = bus._watch_command("feat x/y", 0)
-    cmd = out["run_in_background"]
-    assert "feat%20x" in cmd        # space encoded
-    assert "feat x" not in cmd       # raw space not present
-
-
 # --- source auto-reload watcher -------------------------------------------
 
 def test_source_changed_false_when_unmodified(tmp_path):
@@ -212,3 +197,172 @@ def test_messages_persist_across_reconnect(db):
     # simulate daemon restart: nothing cached, reopen the same file
     rows = bus._read_messages(db, "t", since_id=0)
     assert len(rows) == 2
+
+
+# --- v2 migration ---------------------------------------------------------
+
+def _columns(db, table):
+    import sqlite3
+    c = sqlite3.connect(db); c.row_factory = sqlite3.Row
+    cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+    c.close()
+    return cols
+
+
+def test_init_adds_recipient_column_to_pre_v2_db(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.sqlite3")
+    # simulate a v1 DB: messages table WITHOUT a recipient column
+    c = sqlite3.connect(path)
+    c.execute("""CREATE TABLE messages(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL,
+        author TEXT NOT NULL, body TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+    c.commit(); c.close()
+    assert "recipient" not in _columns(path, "messages")
+    bus._init(path)
+    assert "recipient" in _columns(path, "messages")
+
+
+def test_init_is_idempotent(db):
+    # running _init again on an already-migrated DB must not raise
+    bus._init(db)
+    bus._init(db)
+    assert "recipient" in _columns(db, "messages")
+
+
+def test_init_creates_sessions_table(db):
+    cols = _columns(db, "sessions")
+    assert {"handle", "repo", "status", "current_task", "last_seen", "registered_at"} <= cols
+
+
+# --- addressing -----------------------------------------------------------
+
+def test_directed_message_only_visible_to_recipient(db):
+    bus._post_message(db, "feat", "lead", "for backend", recipient="backend-1")
+    assert bus._read_messages(db, "feat", as_handle="backend-1")[0]["body"] == "for backend"
+    assert bus._read_messages(db, "feat", as_handle="frontend-1") == []
+
+
+def test_broadcast_visible_to_everyone(db):
+    bus._post_message(db, "feat", "lead", "all hands")           # recipient=None
+    assert bus._read_messages(db, "feat", as_handle="backend-1")[0]["body"] == "all hands"
+    assert bus._read_messages(db, "feat", as_handle="frontend-1")[0]["body"] == "all hands"
+
+
+def test_inbox_returns_broadcast_plus_own_directed(db):
+    bus._post_message(db, "feat", "lead", "all hands")            # broadcast
+    bus._post_message(db, "feat", "lead", "for backend", recipient="backend-1")
+    bus._post_message(db, "feat", "lead", "for frontend", recipient="frontend-1")
+    bodies = [m["body"] for m in bus._read_messages(db, "feat", as_handle="backend-1")]
+    assert bodies == ["all hands", "for backend"]
+
+
+def test_channel_agnostic_returns_my_directed_any_channel_excluding_broadcast(db):
+    bus._post_message(db, "chan-a", "lead", "a-direct", recipient="backend-1")
+    bus._post_message(db, "chan-b", "lead", "b-direct", recipient="backend-1")
+    bus._post_message(db, "chan-a", "lead", "a-broadcast")        # broadcast, must be excluded
+    rows = bus._read_messages(db, channel=None, as_handle="backend-1")
+    assert [m["body"] for m in rows] == ["a-direct", "b-direct"]
+
+
+def test_post_message_returns_recipient(db):
+    res = bus._post_message(db, "feat", "lead", "hi", recipient="backend-1")
+    assert res["recipient"] == "backend-1"
+
+
+# --- presence -------------------------------------------------------------
+
+def test_register_inserts_online_session(db):
+    bus._register(db, "backend-1", repo="backend", current_task="checkout API")
+    s = bus._list_sessions(db)
+    assert s == [{"handle": "backend-1", "repo": "backend", "status": "online",
+                  "current_task": "checkout API", "last_seen": s[0]["last_seen"]}]
+
+
+def test_register_upsert_updates_task_preserves_repo(db):
+    bus._register(db, "backend-1", repo="backend", current_task="checkout")
+    bus._register(db, "backend-1", current_task="refunds")     # repo omitted → preserved
+    s = bus._list_sessions(db)[0]
+    assert s["repo"] == "backend"
+    assert s["current_task"] == "refunds"
+
+
+def test_register_offline_status(db):
+    bus._register(db, "backend-1", repo="backend")
+    bus._register(db, "backend-1", status="offline")
+    assert bus._list_sessions(db)[0]["status"] == "offline"
+
+
+def test_list_sessions_ages_out_stale_session(db):
+    bus._register(db, "ghost-1", repo="x")
+    # force last_seen far into the past
+    import sqlite3
+    c = sqlite3.connect(db)
+    c.execute("UPDATE sessions SET last_seen = datetime('now','-1 hour') WHERE handle=?", ("ghost-1",))
+    c.commit(); c.close()
+    assert bus._list_sessions(db, ttl=900)[0]["status"] == "offline"
+
+
+def test_touch_keeps_session_fresh(db):
+    bus._register(db, "backend-1", repo="backend")
+    import sqlite3
+    c = sqlite3.connect(db)
+    c.execute("UPDATE sessions SET last_seen = datetime('now','-1 hour') WHERE handle=?", ("backend-1",))
+    c.commit(); c.close()
+    assert bus._list_sessions(db, ttl=900)[0]["status"] == "offline"   # stale before touch
+    bus._touch(db, "backend-1")
+    assert bus._list_sessions(db, ttl=900)[0]["status"] == "online"    # fresh after touch
+
+
+# --- recipient-aware long-poll --------------------------------------------
+
+def test_wait_wakes_on_directed_message_any_channel(db):
+    bus._register(db, "backend-1", repo="backend")
+
+    async def scenario():
+        async def insert_later():
+            await asyncio.sleep(0.03)
+            bus._post_message(db, "random-chan", "lead", "ping", recipient="backend-1")
+        task = asyncio.create_task(insert_later())
+        rows = await bus._wait_for_message(db, channel=None, since_id=0,
+                                           timeout=2.0, poll=0.01, as_handle="backend-1")
+        await task
+        return rows
+
+    rows = asyncio.run(scenario())
+    assert len(rows) == 1 and rows[0]["body"] == "ping"
+
+
+def test_wait_ignores_broadcast_when_channel_agnostic(db):
+    bus._register(db, "backend-1", repo="backend")
+    bus._post_message(db, "feat", "lead", "broadcast only")   # no recipient
+    rows = asyncio.run(
+        bus._wait_for_message(db, channel=None, since_id=0,
+                              timeout=0.05, poll=0.01, as_handle="backend-1")
+    )
+    assert rows == []   # channel-agnostic excludes broadcasts
+
+
+def test_wait_bumps_last_seen(db):
+    bus._register(db, "backend-1", repo="backend")
+    import sqlite3
+    c = sqlite3.connect(db)
+    c.execute("UPDATE sessions SET last_seen = datetime('now','-1 hour') WHERE handle=?", ("backend-1",))
+    c.commit(); c.close()
+    asyncio.run(bus._wait_for_message(db, channel=None, since_id=0,
+                                      timeout=0.05, poll=0.01, as_handle="backend-1"))
+    assert bus._list_sessions(db, ttl=900)[0]["status"] == "online"   # bumped during the wait
+
+
+# --- route contracts (routes themselves verified e2e) ---------------------
+
+def test_register_route_helper_rejects_missing_handle(db):
+    assert "error" in bus._register(db, "")
+
+
+def test_read_requires_channel_or_as_handle_contract(db):
+    # the /wait route returns 400 when both are absent; the helper itself is permissive
+    # (channel=None, as_handle=None returns all rows; the ROUTE enforces the 400, see e2e).
+    bus._post_message(db, "feat", "lead", "x")
+    assert bus._read_messages(db, channel=None, as_handle=None)  # helper itself is permissive
