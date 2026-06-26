@@ -31,6 +31,20 @@ daemon is down) so an auto-reload flap can't storm it, and the blocking `wait_fo
 is the documented floor for pure-wait. Skills call `bus_cli.py join-cli`/`conclude-cli` using
 `$CLAUDE_CODE_SESSION_ID`. **Stale-tool-schema caveat:** a connected session may keep the old
 tool surface after a daemon hot-reload — restart the session or `/mcp reconnect contract-bus`.
+
+**Validated end-to-end in real cross-session use (2026-06-26).** Two live Claude Code sessions
+in the same repo: auto-join via hook+skill (handles derived, registered), directed routing,
+idle-wake by background watcher **both directions** + by `wait_for_message`, full round-trip
+with no human relay. The live run also caught two bugs the 69 unit tests missed — fixed +
+re-validated: (1) the watcher must write the **cursor file** (a Stop-injected re-arm reads
+`since_id` from it; was always 0 → re-delivery), (2) the blocking `wait_for_message` **tool
+occupies the session and costs a turn per timeout re-queue** — it is NOT "0 tokens/idle"; the
+**backgrounded watcher is the efficient default** (turn ends → session idle/free), with
+`wait_for_message(timeout=600)` the documented fallback. Confirmed live: the Stop supervisor
+re-injects only when `watcher_alive` is false (silent with a live watcher → no flap-storm), and
+a SIGKILL'd background task still fires a `task-notification` (so kill-death is recoverable;
+only parent-`claude` death is the silent class).
+
 **Plugin packaging** (`.claude-plugin`/`hooks.json`/`.mcp.json` + flock `ensure-daemon`,
 LaunchAgent → optional) is the next plan (Plan 3) — not yet built.
 
