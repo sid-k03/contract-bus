@@ -109,7 +109,7 @@ def test_daemon_up_and_register_roundtrip(tmp_path):
 
 def test_watch_command_shape():
     cmd = c.watch_command("s", "h", 7, plugin_root="/p")
-    assert cmd == "bash /p/bus_watch.sh s h 7"
+    assert cmd == 'bash "/p/bus_watch.sh" s h 7'
 
 
 def test_launch_directive_embeds_handle_cursor_and_floor(tmp_path):
@@ -119,7 +119,7 @@ def test_launch_directive_embeds_handle_cursor_and_floor(tmp_path):
     c.write_cursor(sid, 5, root=str(tmp_path))
     msg = c.launch_directive(sid, plugin_root="/p", root=str(tmp_path))
     assert "data-bus-mcp-a3f29c1b" in msg
-    assert "bus_watch.sh s data-bus-mcp-a3f29c1b 5" in msg
+    assert 'bus_watch.sh" s data-bus-mcp-a3f29c1b 5' in msg
     assert "background" in msg.lower()
     assert "wait_for_message" in msg            # the documented floor is offered
     assert "untrusted" in msg.lower()           # security note present
@@ -133,7 +133,7 @@ def test_join_writes_state_and_returns_directive(tmp_path, monkeypatch):
     out = c.join("abcdef1234", "/Users/x/Data Bus MCP", current_task="checkout", plugin_root="/p")
     assert c.read_identity("abcdef1234", root=str(tmp_path)) == "data-bus-mcp-abcdef12"
     assert c.is_active("abcdef1234", root=str(tmp_path)) is True
-    assert "bus_watch.sh abcdef1234 data-bus-mcp-abcdef12 0" in out["hookSpecificOutput"]["additionalContext"]
+    assert 'bus_watch.sh" abcdef1234 data-bus-mcp-abcdef12 0' in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_ev_session_start_directive_when_active_else_none(tmp_path, monkeypatch):
@@ -190,3 +190,82 @@ def test_conclude_removes_dir(tmp_path, monkeypatch):
     res = c.conclude(sid)
     assert res["concluded"] == "h-sC"
     assert not os.path.exists(d)
+
+
+# --- ensure-daemon + _venv_python (Plan 3, Task 1) -------------------------
+
+def test_ensure_daemon_noop_when_already_up(monkeypatch):
+    calls = {"popen": 0}
+    monkeypatch.setattr(c, "daemon_up", lambda *a, **k: True)
+    monkeypatch.setattr(c.subprocess, "Popen", lambda *a, **k: calls.__setitem__("popen", calls["popen"] + 1))
+    assert c.ensure_daemon("/plugin") is True
+    assert calls["popen"] == 0
+
+
+def test_ensure_daemon_spawns_with_canonical_db(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, "DAEMON_HOME", str(tmp_path))
+    states = iter([False, False, True])
+    monkeypatch.setattr(c, "daemon_up", lambda *a, **k: next(states))
+    monkeypatch.setattr(c, "_venv_python", lambda pr: "/fake/python")
+    spawned = {}
+    monkeypatch.setattr(c.subprocess, "Popen",
+                        lambda argv, **kw: spawned.update(argv=argv, kw=kw) or type("P", (), {})())
+    assert c.ensure_daemon("/plugin", timeout=2.0) is True
+    assert spawned["argv"] == ["/fake/python", "/plugin/bus_server.py"]
+    assert spawned["kw"]["start_new_session"] is True
+    assert spawned["kw"]["env"]["CONTRACT_BUS_DB"] == str(tmp_path / "bus.sqlite3")
+
+
+def test_ensure_daemon_swallows_build_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, "DAEMON_HOME", str(tmp_path))
+    monkeypatch.setattr(c, "daemon_up", lambda *a, **k: False)
+    def boom(pr): raise RuntimeError("pip exploded")
+    monkeypatch.setattr(c, "_venv_python", boom)
+    assert c.ensure_daemon("/plugin", timeout=1.0) is False   # never raises
+
+
+def test_venv_python_reuses_when_ready_sentinel_matches(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, "DAEMON_HOME", str(tmp_path))
+    venv = tmp_path / ".venv"; (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("")
+    # write a matching requirements hash + .ready
+    monkeypatch.setattr(c, "_req_hash", lambda pr: "abc")
+    (venv / ".ready").write_text("abc")
+    ran = {"n": 0}
+    monkeypatch.setattr(c.subprocess, "run", lambda *a, **k: ran.__setitem__("n", ran["n"] + 1))
+    assert c._venv_python("/plugin") == str(venv / "bin" / "python")
+    assert ran["n"] == 0                       # ready + hash match → no rebuild
+
+
+def test_venv_python_rebuilds_on_stale_or_missing_sentinel(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, "DAEMON_HOME", str(tmp_path))
+    venv = tmp_path / ".venv"; (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("")   # partial venv, NO .ready
+    monkeypatch.setattr(c, "_req_hash", lambda pr: "abc")
+    removed = {"n": 0}
+    monkeypatch.setattr(c.shutil, "rmtree", lambda p, **k: removed.__setitem__("n", removed["n"] + 1))
+    built = {"runs": []}
+    def fake_run(argv, **k):
+        built["runs"].append(argv)
+        if argv[:3] == [c.sys.executable, "-m", "venv"]:
+            (venv / "bin").mkdir(parents=True, exist_ok=True)
+            (venv / "bin" / "python").write_text("")
+    monkeypatch.setattr(c.subprocess, "run", fake_run)
+    py = c._venv_python("/plugin")
+    assert removed["n"] == 1                    # partial venv wiped first
+    assert (venv / ".ready").read_text() == "abc"   # sentinel written after build
+
+
+# --- plugin-root resolution + watch path quoting (Task 6) -----------------
+
+def test_main_prefers_claude_plugin_root(monkeypatch):
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/plug/root")
+    seen = {}
+    monkeypatch.setattr(c, "ensure_daemon", lambda pr, *a, **k: seen.setdefault("pr", pr) or True)
+    c.main(["bus_cli.py", "ensure-daemon"])
+    assert seen["pr"] == "/plug/root"
+
+
+def test_watch_command_quotes_path_with_spaces():
+    cmd = c.watch_command("sid", "h", 7, plugin_root="/a b/Data Bus MCP")
+    assert cmd == 'bash "/a b/Data Bus MCP/bus_watch.sh" sid h 7'

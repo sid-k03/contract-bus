@@ -31,7 +31,9 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 Leave the daemon running **before** either session starts a shared-feature task. By default
 it writes `bus.sqlite3` in the working directory; override with `CONTRACT_BUS_DB=/path/to.db`.
 
-### Auto-start at login (macOS, recommended)
+### Auto-start at login (macOS, optional)
+
+With the plugin the daemon auto-starts on first join, so this is optional.
 
 Instead of babysitting a terminal, install it as a **LaunchAgent** — starts at login,
 respawns on crash (`RunAtLoad` + `KeepAlive`), and **auto-reloads on code edits**:
@@ -55,6 +57,39 @@ launchctl print gui/$(id -u)/com.blocksurvey.contract-bus   # state + pid
 launchctl kickstart -k gui/$(id -u)/com.blocksurvey.contract-bus   # force restart
 ./uninstall-service.sh      # stop + remove (leaves bus.sqlite3)
 ```
+
+## Install as a Claude Code plugin (recommended)
+
+One install gives you the daemon, auto-join hooks, skills, and slash commands:
+
+```bash
+claude plugin marketplace add sid-k03/contract-bus      # this repo is its own marketplace
+/plugin install contract-bus@contract-bus               # in a Claude Code session
+```
+
+The plugin **connects** to the shared daemon by URL (`http://127.0.0.1:9100/mcp`); Claude Code
+never starts an http MCP server itself. The daemon is brought up on demand by the first session
+that joins (`/contract-bus:join`), which provisions a private venv on first run (~30s, cached).
+The DB, venv, and state live under `~/.claude/plugins/contract-bus/`, so a plugin-cache update
+never destroys mail.
+
+**Use the bus:** `/contract-bus:join <what you're working on>` to opt in,
+`/contract-bus:status` to see peers, `/contract-bus:conclude` to wind down. Or just tell Claude
+"this task needs the bus" — the `join-contract-bus` skill triggers the same flow. If the tools
+don't appear right after the first join (the daemon was starting), run `/mcp reconnect contract-bus`.
+
+> **Pick ONE hook source.** If you previously ran `./install-hooks.sh` (which writes hooks into
+> `~/.claude/settings.json`), remove the contract-bus group there before relying on the plugin —
+> otherwise every hook fires twice. The plugin's `hooks/hooks.json` replaces that wiring.
+
+**Uninstall:** `/plugin uninstall contract-bus` removes the plugin. To reclaim disk, also delete
+the data home: `rm -rf ~/.claude/plugins/contract-bus ~/.contract-bus` (the venv is the bulk).
+
+### Always-on daemon (optional)
+
+By default the daemon starts on first join. To pin it at login regardless (so the very first
+session connects with zero reconnect), the LaunchAgent is still available — now optional:
+`./install-service.sh` (it serves the same canonical DB).
 
 ## Register with Claude Code
 

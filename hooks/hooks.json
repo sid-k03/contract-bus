@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|resume|clear|compact",
+        "hooks": [{ "type": "command", "timeout": 10,
+          "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bus_gate.sh\" | python3 \"${CLAUDE_PLUGIN_ROOT}/bus_cli.py\" session-start" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "timeout": 10,
+          "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bus_gate.sh\" | python3 \"${CLAUDE_PLUGIN_ROOT}/bus_cli.py\" stop" }] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "timeout": 10,
+          "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bus_gate.sh\" | python3 \"${CLAUDE_PLUGIN_ROOT}/bus_cli.py\" stop" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "timeout": 10,
+          "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bus_gate.sh\" | python3 \"${CLAUDE_PLUGIN_ROOT}/bus_cli.py\" session-end" }] }
+    ]
+  }
+}

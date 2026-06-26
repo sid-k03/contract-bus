@@ -8,6 +8,8 @@ so the watcher is launched BY THE MODEL (bus_watch.sh) per a directive this scri
 State per session: ~/.contract-bus/<session_id>/{active,identity,cursor,watcher.pid}
 Keyed by session_id (always in hook stdin, stable per session); the handle is in `identity`.
 """
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -25,6 +27,12 @@ BASE = os.environ.get("CONTRACT_BUS_BASE", f"http://{HOST}:{PORT}")
 CONNECT_TIMEOUT = 2.0
 STATE_ROOT = os.environ.get("CONTRACT_BUS_STATE", os.path.expanduser("~/.contract-bus"))
 STATE_TTL_DAYS = 7
+DAEMON_HOME = os.environ.get("CONTRACT_BUS_HOME",
+                             os.path.expanduser("~/.claude/plugins/contract-bus"))
+
+
+def daemon_db() -> str:
+    return os.path.join(DAEMON_HOME, "bus.sqlite3")
 
 
 # --- identity / handle / state dir ----------------------------------------
@@ -144,10 +152,80 @@ def register(handle: str, repo: str | None = None, status: str = "online",
         return False
 
 
+# --- daemon lifecycle: atomic venv + fcntl-guarded singleton (D1/D2/D6) -----------------
+
+def _req_hash(plugin_root: str) -> str:
+    try:
+        with open(os.path.join(plugin_root, "requirements.txt"), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def _venv_python(plugin_root: str) -> str:
+    """Path to the daemon's python. Builds a private venv under DAEMON_HOME once and reuses it.
+    Atomicity (C1): a `.ready` sentinel holding the requirements hash is written ONLY after pip
+    succeeds; a missing/stale sentinel ⇒ wipe + rebuild (a killed pip leaves bin/python but no
+    fastmcp). bus_cli (hooks) stays stdlib-only and never calls this. Raises on build failure."""
+    venv = os.path.join(DAEMON_HOME, ".venv")
+    py = os.path.join(venv, "bin", "python")
+    ready = os.path.join(venv, ".ready")
+    want = _req_hash(plugin_root)
+    if os.path.exists(py) and os.path.exists(ready):
+        with open(ready) as f:
+            if f.read().strip() == want:
+                return py
+    if os.path.exists(venv):
+        shutil.rmtree(venv, ignore_errors=True)          # wipe partial/stale
+    if sys.version_info < (3, 11):                        # MN3
+        raise RuntimeError(f"python {sys.version_info[:2]} < 3.11; cannot build daemon venv")
+    os.makedirs(DAEMON_HOME, exist_ok=True)
+    subprocess.run([sys.executable or "python3", "-m", "venv", venv], check=True, timeout=120)
+    subprocess.run([os.path.join(venv, "bin", "pip"), "install", "-q",
+                    "-r", os.path.join(plugin_root, "requirements.txt")], check=True, timeout=300)
+    with open(ready, "w") as f:                           # sentinel LAST
+        f.write(want)
+    return py
+
+
+def ensure_daemon(plugin_root: str, timeout: float = 30.0) -> bool:
+    """Idempotently ensure the single shared daemon is up. fcntl.flock-guarded so concurrent
+    first-joiners don't double-spawn (D2). Detached (start_new_session) so it outlives the hook/
+    command. Pins the canonical DB (D6). NEVER raises — a build failure returns False."""
+    try:
+        if daemon_up():
+            return True
+        os.makedirs(DAEMON_HOME, exist_ok=True)
+        lf = open(os.path.join(DAEMON_HOME, "daemon.lock"), "w")
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            if daemon_up():                              # lost the race; someone started it
+                return True
+            py = _venv_python(plugin_root)
+            log = open(os.path.join(DAEMON_HOME, "daemon.log"), "a")
+            env = dict(os.environ, CONTRACT_BUS_DB=daemon_db())
+            subprocess.Popen([py, os.path.join(plugin_root, "bus_server.py")],
+                             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                             start_new_session=True, env=env)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if daemon_up():
+                    return True
+                time.sleep(0.3)
+            return False
+        finally:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+            finally:
+                lf.close()
+    except Exception:
+        return False
+
+
 # --- the model-owned watcher launch directive (spec §6.1) -----------------
 
 def watch_command(session_id: str, handle: str, since_id: int, plugin_root: str = ".") -> str:
-    return f"bash {plugin_root}/bus_watch.sh {session_id} {handle} {int(since_id)}"
+    return f'bash "{plugin_root}/bus_watch.sh" {session_id} {handle} {int(since_id)}'
 
 
 def launch_directive(session_id: str, plugin_root: str = ".", root: str = STATE_ROOT) -> str:
@@ -286,8 +364,9 @@ def ev_session_end(hook: dict) -> None:
 
 def main(argv: list[str]) -> int:
     event = argv[1] if len(argv) > 1 else ""
-    plugin_root = os.environ.get("CONTRACT_BUS_PLUGIN_ROOT",
-                                 os.path.dirname(os.path.abspath(__file__)))
+    plugin_root = (os.environ.get("CLAUDE_PLUGIN_ROOT")
+                   or os.environ.get("CONTRACT_BUS_PLUGIN_ROOT")
+                   or os.path.dirname(os.path.abspath(__file__)))
     # argv-driven commands (skills call these; they do NOT read stdin)
     if event == "join-cli":
         sid, root_arg = argv[2], argv[3]
@@ -297,6 +376,10 @@ def main(argv: list[str]) -> int:
     if event == "conclude-cli":
         print(json.dumps(conclude(argv[2])))
         return 0
+    if event == "ensure-daemon":
+        up = ensure_daemon(plugin_root)
+        print(json.dumps({"daemon": "up" if up else "down"}))
+        return 0 if up else 1
     # stdin-driven hook events
     try:
         hook = json.load(sys.stdin) if not sys.stdin.isatty() else {}

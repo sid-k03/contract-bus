@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "contract-bus",
+  "description": "Cross-session contract bus for Claude Code.",
+  "owner": { "name": "BlockSurvey", "url": "https://github.com/sid-k03/contract-bus" },
+  "plugins": [
+    {
+      "name": "contract-bus",
+      "description": "Shared daemon + auto-join hooks + skills + slash commands for cross-repo session coordination.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

@@ -45,8 +45,18 @@ re-injects only when `watcher_alive` is false (silent with a live watcher → no
 a SIGKILL'd background task still fires a `task-notification` (so kill-death is recoverable;
 only parent-`claude` death is the silent class).
 
-**Plugin packaging** (`.claude-plugin`/`hooks.json`/`.mcp.json` + flock `ensure-daemon`,
-LaunchAgent → optional) is the next plan (Plan 3) — not yet built.
+**v3 plugin packaging — landed (Plan 3, `plans/2026-06-26-contract-bus-v3-plugin.md`).**
+Installs as a Claude Code plugin: `.claude-plugin/plugin.json` + self-`marketplace.json`,
+connect-only `.mcp.json` (`type:http`), `hooks/hooks.json` (same `bus_gate.sh | bus_cli.py`
+pipeline via `${CLAUDE_PLUGIN_ROOT}`, gate preserved), the 3 skills, and `commands/`
+(`/contract-bus:join|conclude|status`) backed by `bus_join.sh`/`bus_conclude.sh` wrappers
+(fenced `!` exec + `allowed-tools`; `${CLAUDE_PLUGIN_ROOT}` is NOT in the model's own Bash, so
+commands carry it). The shared daemon is auto-provisioned by `bus_cli.py ensure-daemon` — an
+`fcntl.flock`-guarded singleton (no `flock(1)` on macOS) from a private venv validated by a
+`.ready` sentinel + requirements-hash (rebuilds on `fastmcp==3.4.2` bumps). DB/venv/state under
+`~/.claude/plugins/contract-bus/` (canonical for the plugin AND the LaunchAgent — no split-brain;
+`install-service.sh` migrates the old repo DB). LaunchAgent now optional. Manual install still
+works — pick ONE hook source.
 
 The auto-start scripts generate a per-user LaunchAgent `com.blocksurvey.contract-bus`
 (`~/Library/LaunchAgents/…plist`) with `RunAtLoad`+`KeepAlive`, pinning an absolute

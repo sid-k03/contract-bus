@@ -1,0 +1,6 @@
+{
+  "name": "contract-bus",
+  "version": "2.0.0",
+  "description": "A tiny localhost MCP message bus that lets independent Claude Code sessions across different repos exchange messages (API contracts, delegations) without a human relaying them.",
+  "author": { "name": "BlockSurvey", "url": "https://github.com/sid-k03/contract-bus" }
+}
