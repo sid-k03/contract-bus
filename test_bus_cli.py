@@ -190,3 +190,67 @@ def test_conclude_removes_dir(tmp_path, monkeypatch):
     res = c.conclude(sid)
     assert res["concluded"] == "h-sC"
     assert not os.path.exists(d)
+
+
+# --- ensure-daemon + _venv_python (Plan 3, Task 1) -------------------------
+
+def test_ensure_daemon_noop_when_already_up(monkeypatch):
+    calls = {"popen": 0}
+    monkeypatch.setattr(c, "daemon_up", lambda *a, **k: True)
+    monkeypatch.setattr(c.subprocess, "Popen", lambda *a, **k: calls.__setitem__("popen", calls["popen"] + 1))
+    assert c.ensure_daemon("/plugin") is True
+    assert calls["popen"] == 0
+
+
+def test_ensure_daemon_spawns_with_canonical_db(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, "DAEMON_HOME", str(tmp_path))
+    states = iter([False, False, True])
+    monkeypatch.setattr(c, "daemon_up", lambda *a, **k: next(states))
+    monkeypatch.setattr(c, "_venv_python", lambda pr: "/fake/python")
+    spawned = {}
+    monkeypatch.setattr(c.subprocess, "Popen",
+                        lambda argv, **kw: spawned.update(argv=argv, kw=kw) or type("P", (), {})())
+    assert c.ensure_daemon("/plugin", timeout=2.0) is True
+    assert spawned["argv"] == ["/fake/python", "/plugin/bus_server.py"]
+    assert spawned["kw"]["start_new_session"] is True
+    assert spawned["kw"]["env"]["CONTRACT_BUS_DB"] == str(tmp_path / "bus.sqlite3")
+
+
+def test_ensure_daemon_swallows_build_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, "DAEMON_HOME", str(tmp_path))
+    monkeypatch.setattr(c, "daemon_up", lambda *a, **k: False)
+    def boom(pr): raise RuntimeError("pip exploded")
+    monkeypatch.setattr(c, "_venv_python", boom)
+    assert c.ensure_daemon("/plugin", timeout=1.0) is False   # never raises
+
+
+def test_venv_python_reuses_when_ready_sentinel_matches(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, "DAEMON_HOME", str(tmp_path))
+    venv = tmp_path / ".venv"; (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("")
+    # write a matching requirements hash + .ready
+    monkeypatch.setattr(c, "_req_hash", lambda pr: "abc")
+    (venv / ".ready").write_text("abc")
+    ran = {"n": 0}
+    monkeypatch.setattr(c.subprocess, "run", lambda *a, **k: ran.__setitem__("n", ran["n"] + 1))
+    assert c._venv_python("/plugin") == str(venv / "bin" / "python")
+    assert ran["n"] == 0                       # ready + hash match → no rebuild
+
+
+def test_venv_python_rebuilds_on_stale_or_missing_sentinel(monkeypatch, tmp_path):
+    monkeypatch.setattr(c, "DAEMON_HOME", str(tmp_path))
+    venv = tmp_path / ".venv"; (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("")   # partial venv, NO .ready
+    monkeypatch.setattr(c, "_req_hash", lambda pr: "abc")
+    removed = {"n": 0}
+    monkeypatch.setattr(c.shutil, "rmtree", lambda p, **k: removed.__setitem__("n", removed["n"] + 1))
+    built = {"runs": []}
+    def fake_run(argv, **k):
+        built["runs"].append(argv)
+        if argv[:3] == [c.sys.executable, "-m", "venv"]:
+            (venv / "bin").mkdir(parents=True, exist_ok=True)
+            (venv / "bin" / "python").write_text("")
+    monkeypatch.setattr(c.subprocess, "run", fake_run)
+    py = c._venv_python("/plugin")
+    assert removed["n"] == 1                    # partial venv wiped first
+    assert (venv / ".ready").read_text() == "abc"   # sentinel written after build
