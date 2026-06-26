@@ -103,3 +103,23 @@ def test_daemon_up_and_register_roundtrip(tmp_path):
     assert c.register("backend-1", repo="backend", current_task="checkout") is True
     sessions = b._list_sessions(b.DB)
     assert any(s["handle"] == "backend-1" and s["current_task"] == "checkout" for s in sessions)
+
+
+# --- watcher-launch directive (model-owned; R2: carries session_id) -------
+
+def test_watch_command_shape():
+    cmd = c.watch_command("s", "h", 7, plugin_root="/p")
+    assert cmd == "bash /p/bus_watch.sh s h 7"
+
+
+def test_launch_directive_embeds_handle_cursor_and_floor(tmp_path):
+    sid = "s"; d = c.state_dir(sid, root=str(tmp_path)); os.makedirs(d)
+    with open(os.path.join(d, "identity"), "w") as f:
+        f.write("data-bus-mcp-a3f29c1b")
+    c.write_cursor(sid, 5, root=str(tmp_path))
+    msg = c.launch_directive(sid, plugin_root="/p", root=str(tmp_path))
+    assert "data-bus-mcp-a3f29c1b" in msg
+    assert "bus_watch.sh s data-bus-mcp-a3f29c1b 5" in msg
+    assert "background" in msg.lower()
+    assert "wait_for_message" in msg            # the documented floor is offered
+    assert "untrusted" in msg.lower()           # security note present
