@@ -17,12 +17,20 @@ try:
 except (OSError, ValueError):
     cur = {}
 cur.setdefault("hooks", {})
+
+def _is_bus_group(group):
+    return any("bus_cli.py" in h.get("command", "") for h in group.get("hooks", []))
+
+# MERGE, never clobber: keep the user's existing hook groups for each event, drop only
+# prior contract-bus groups (idempotent re-install), then append ours.
 for ev, groups in snip.items():
-    cur["hooks"][ev] = groups   # replace contract-bus events wholesale (idempotent)
+    kept = [g for g in cur["hooks"].get(ev, []) if not _is_bus_group(g)]
+    cur["hooks"][ev] = kept + groups
+
 os.makedirs(os.path.dirname(settings), exist_ok=True)
 with open(settings, "w") as f:
     json.dump(cur, f, indent=2)
-print(f"wired contract-bus hooks into {settings}")
+print(f"merged contract-bus hooks into {settings} (existing hooks preserved)")
 PY
 # Link the 3 skills into the user skills dir so Claude Code auto-discovers them (no plugin
 # needed for the interim; Plan 3 ships them inside the plugin instead). Symlinks stay in sync
