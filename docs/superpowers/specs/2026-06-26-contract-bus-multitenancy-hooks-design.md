@@ -538,9 +538,12 @@ next human message. Document this; do **not** claim "respawn for any reason."
   storm. (3) `watch_command`/`launch_directive` carry `session_id` so the watcher can key its
   pid file. The 8-continuation cap does **not** bound a flap-storm (those are fresh
   `task-notification` turns, not continuation chains) — the throttle is what bounds it.
-- **Still unverified (live-test in Plan 2 Task 9, external observer):** does a `kill -9`'d /
-  parent-died background task still fire `task-notification`? (If not, that is a silent-death
-  class with no in-session recovery.) Resume re-arm likely waits for the human's first prompt.
+- **Kill-path VERIFIED (live, 2026-06-26):** a `SIGKILL`'d agent background task **does** fire a
+  `task-notification` (status `failed`) and wakes the session — so watcher death by mail,
+  timeout, *or external kill* are all recoverable (Stop supervisor re-arms). The **only** silent
+  class is **parent-`claude` death** (crash / terminal-close / reboot): it kills the session that
+  would receive the notification, so recovery waits for `--resume` + the human's first prompt.
+  That window is narrow and inherent. (Plan 2 is implemented + committed; 68 tests pass.)
 
 ---
 
