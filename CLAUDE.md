@@ -58,9 +58,6 @@ commands carry it). The shared daemon is auto-provisioned by `bus_cli.py ensure-
 `install-service.sh` migrates the old repo DB). LaunchAgent now optional. Manual install still
 works — pick ONE hook source.
 
-**Plugin packaging** (`.claude-plugin`/`hooks.json`/`.mcp.json` + flock `ensure-daemon`,
-LaunchAgent → optional) is the next plan (Plan 3) — not yet built.
-
 The auto-start scripts generate a per-user LaunchAgent `com.blocksurvey.contract-bus`
 (`~/Library/LaunchAgents/…plist`) with `RunAtLoad`+`KeepAlive`, pinning an absolute
 `CONTRACT_BUS_DB` and logging to `~/Library/Logs/com.blocksurvey.contract-bus.log`. The
