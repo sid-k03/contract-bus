@@ -123,3 +123,70 @@ def test_launch_directive_embeds_handle_cursor_and_floor(tmp_path):
     assert "background" in msg.lower()
     assert "wait_for_message" in msg            # the documented floor is offered
     assert "untrusted" in msg.lower()           # security note present
+
+
+# --- event entrypoints: join / conclude / reap / ev_stop / ev_session_start
+
+def test_join_writes_state_and_returns_directive(tmp_path, monkeypatch):
+    monkeypatch.setattr(c, "STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(c, "register", lambda *a, **k: True)
+    out = c.join("abcdef1234", "/Users/x/Data Bus MCP", current_task="checkout", plugin_root="/p")
+    assert c.read_identity("abcdef1234", root=str(tmp_path)) == "data-bus-mcp-abcdef12"
+    assert c.is_active("abcdef1234", root=str(tmp_path)) is True
+    assert "bus_watch.sh abcdef1234 data-bus-mcp-abcdef12 0" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_ev_session_start_directive_when_active_else_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(c, "STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(c, "register", lambda *a, **k: True)
+    assert c.ev_session_start({"session_id": "nojoin"}) is None      # not active
+    sid = "act"; d = c.state_dir(sid, root=str(tmp_path)); os.makedirs(d)
+    open(os.path.join(d, "active"), "w").close()
+    with open(os.path.join(d, "identity"), "w") as f: f.write("h-act")
+    out = c.ev_session_start({"session_id": sid})
+    assert "bus_watch.sh" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_ev_stop_throttled_supervisor(tmp_path, monkeypatch):
+    monkeypatch.setattr(c, "STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(c, "daemon_up", lambda *a, **k: True)
+    monkeypatch.setattr(c, "watcher_alive", lambda *a, **k: False)
+    sid = "sS"; d = c.state_dir(sid, root=str(tmp_path)); os.makedirs(d)
+    open(os.path.join(d, "active"), "w").close()
+    with open(os.path.join(d, "identity"), "w") as f: f.write("h-sS")
+    # fires when active + dead watcher + throttle clear
+    out = c.ev_stop({"session_id": sid, "stop_hook_active": False}, plugin_root="/p")
+    assert "bus_watch.sh" in out["hookSpecificOutput"]["additionalContext"]
+    # throttled on an immediate second call (R3: bound the relaunch storm)
+    assert c.ev_stop({"session_id": sid, "stop_hook_active": False}) is None
+    # loop guard
+    assert c.ev_stop({"session_id": sid, "stop_hook_active": True}) is None
+    # a live watcher → nothing to do
+    monkeypatch.setattr(c, "watcher_alive", lambda *a, **k: True)
+    # clear throttle by removing the marker, prove watcher_alive short-circuits
+    os.remove(os.path.join(d, "last_reinject"))
+    assert c.ev_stop({"session_id": sid, "stop_hook_active": False}) is None
+
+
+def test_reap_stale_respects_grace_and_ttl(tmp_path, monkeypatch):
+    monkeypatch.setattr(c, "STATE_ROOT", str(tmp_path))
+    fresh = c.state_dir("fresh", root=str(tmp_path)); os.makedirs(fresh)
+    open(os.path.join(fresh, "active"), "w").close()
+    old = c.state_dir("old", root=str(tmp_path)); os.makedirs(old)
+    am = os.path.join(old, "active"); open(am, "w").close()
+    ancient = time.time() - (c.STATE_TTL_DAYS + 1) * 86400
+    os.utime(am, (ancient, ancient))
+    reaped = c.reap_stale(root=str(tmp_path))
+    assert "old" in reaped and "fresh" not in reaped
+    assert not os.path.exists(old) and os.path.exists(fresh)
+
+
+def test_conclude_removes_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(c, "STATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(c, "register", lambda *a, **k: True)
+    sid = "sC"; d = c.state_dir(sid, root=str(tmp_path)); os.makedirs(d)
+    with open(os.path.join(d, "identity"), "w") as f: f.write("h-sC")
+    open(os.path.join(d, "active"), "w").close()
+    res = c.conclude(sid)
+    assert res["concluded"] == "h-sC"
+    assert not os.path.exists(d)
