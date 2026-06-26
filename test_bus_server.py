@@ -123,6 +123,16 @@ def test_list_sessions_tool_helper_present():
     assert hasattr(bus, "list_sessions")
 
 
+def test_wait_for_message_tool_helper_present():
+    # the model-facing surface re-exposes wait_for_message (the documented idle-wake floor)
+    assert hasattr(bus, "wait_for_message")
+
+
+def test_usage_guide_mentions_wait_for_message():
+    low = bus._usage().lower()
+    assert "wait_for_message" in low
+
+
 def test_server_instructions_set_for_handshake_discovery():
     # FastMCP sends `instructions` during the initialize handshake, so a connecting
     # session discovers the bus without calling any tool.
