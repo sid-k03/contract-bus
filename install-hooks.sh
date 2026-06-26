@@ -2,6 +2,8 @@
 # Merge the contract-bus hook block into ~/.claude/settings.json (user scope), pinning this
 # repo's absolute path. Idempotent: re-running replaces the contract-bus hooks. Needs python3.
 set -e
+echo "note: the Claude Code plugin (/plugin install contract-bus) is the preferred install."
+echo "      Use this script only for a manual (non-plugin) setup; do not run BOTH (hooks double-fire)."
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 chmod +x "$ROOT/bus_gate.sh" "$ROOT/bus_watch.sh"
