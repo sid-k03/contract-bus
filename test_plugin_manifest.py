@@ -13,3 +13,9 @@ def test_marketplace_self_source():
     assert mk["$schema"].endswith("marketplace.schema.json")
     p = next(p for p in mk["plugins"] if p["name"] == "contract-bus")
     assert p["source"] == "./" and p["description"]
+
+def test_mcp_json_http_connect_only():
+    s = _load(".mcp.json")["mcpServers"]["contract-bus"]
+    assert s["type"] == "http"
+    assert s["url"] == "http://127.0.0.1:9100/mcp"
+    assert "command" not in s
